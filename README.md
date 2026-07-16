@@ -21,7 +21,7 @@ A pure-Go Excel (.xlsx) library — create, read, and write ECMA-376 Office Open
 ## Installation
 
 ```bash
-go get github.com/aspose/cells_foss
+go get github.com/aspose/cells_foss/v26
 ```
 
 Requires **Go 1.18+**. Only depends on the standard library + `golang.org/x/crypto`.
@@ -31,7 +31,7 @@ Requires **Go 1.18+**. Only depends on the standard library + `golang.org/x/cryp
 ```go
 package main
 
-import cells_foss "github.com/aspose/cells_foss/aspose/cells_foss"
+import cells_foss "github.com/aspose/cells_foss/v26/aspose/cells_foss"
 
 func main() {
     // Create.

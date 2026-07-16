@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	cells_foss "github.com/aspose/cells_foss/aspose/cells_foss"
+	cells_foss "github.com/aspose/cells_foss/v26/aspose/cells_foss"
 )
 
 func TestIntegration_FullWorkflow(t *testing.T) {

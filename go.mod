@@ -1,5 +1,3 @@
-module github.com/aspose/cells_foss
+module github.com/aspose/cells_foss/v26
 
 go 1.24.5
-
-require golang.org/x/crypto v0.32.0 // indirect

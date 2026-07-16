@@ -6,7 +6,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/aspose/cells_foss/aspose/cells_foss"
+	"github.com/aspose/cells_foss/v26/aspose/cells_foss"
 )
 
 // generateSmallPNG creates a minimal valid 1×1 PNG image.

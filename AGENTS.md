@@ -129,7 +129,7 @@ ws.Cells[0][0].Value = "Revenue"  // Don't use tuple/array indices
 package main
 
 import (
-    "github.com/aspose/cells_foss"
+    "github.com/aspose/cells_foss/v26"
 )
 
 func main() {
