@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	cells_foss "github.com/aspose/cells_foss/v26/aspose/cells_foss"
+	cells_foss "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss"
 )
 
 func TestSaveNewWorkbook_RoundTrip(t *testing.T) {
