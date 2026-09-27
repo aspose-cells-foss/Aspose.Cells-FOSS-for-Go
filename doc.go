@@ -1,8 +1,8 @@
 // Package cells_foss is a pure-Go Excel (.xlsx) library.
 //
 // Aspose.Cells for Go allows you to create, read, and write ECMA-376
-// Office Open XML spreadsheets without any external dependencies beyond
-// the Go standard library and golang.org/x/crypto.
+// Office Open XML spreadsheets using only the Go standard library — the
+// module has no third-party dependencies.
 //
 // # Import
 //

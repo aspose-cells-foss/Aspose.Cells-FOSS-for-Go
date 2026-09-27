@@ -21,10 +21,10 @@ A pure-Go Excel (.xlsx) library — create, read, and write ECMA-376 Office Open
 ## Installation
 
 ```bash
-go get github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26
+go get github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss
 ```
 
-Requires **Go 1.18+**. Only depends on the standard library + `golang.org/x/crypto`.
+Requires **Go 1.24.5+** (see `go.mod`). Depends only on the Go standard library — no third-party modules.
 
 ## Quick Start
 
@@ -180,7 +180,7 @@ For the complete API reference and usage guide, see **[docs/usage.md](docs/usage
 - **A1-style references** (e.g. `"A1"`, `"B2"`) — tuple/array indices (e.g. `[0, 0]`) are not supported
 - Modified content regenerates XML; unmodified content reuses original XML
 - ECMA-376-compatible element ordering
-- No third-party dependencies beyond `golang.org/x/crypto`
+- No third-party dependencies — Go standard library only
 - Do not commit generated `.xlsx` files or contents of `outputfiles/`
 
 ## License

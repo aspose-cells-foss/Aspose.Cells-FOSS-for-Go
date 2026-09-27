@@ -6,7 +6,7 @@ You are a senior Go engineer working on a pure-Go Excel library. Prioritize Exce
 
 - Treat `aspose/cells_foss/` as the source of truth for library behavior and public API
 - Treat `examples/` as executable usage coverage; keep examples aligned with the current API
-- Use A1-style string references for cell access: `ws.Cells["A1"]`
+- Use A1-style string references for cell access: `ws.Cells().Set("A1", v)` / `ws.Cells().Get("A1")`
 - Preserve loaded workbook content when it was not modified, especially XML parts cached on objects such as `sourceXML`
 - Add new workbook features through the existing loader/saver split: `xml_feature_loader.go` and `xml_feature_saver.go`
 - Keep worksheet XML in ECMA-376-compatible element order when adding new nodes
@@ -17,7 +17,7 @@ You are a senior Go engineer working on a pure-Go Excel library. Prioritize Exce
 
 ## Never
 
-- Never use tuple-based cell keys like `ws.Cells[0, 0]`
+- Never use tuple/array-index cell addressing like `ws.Cells[0][0]` — the collection is keyed by A1 strings
 - Never regenerate XML for loaded objects that were not changed if preserved source XML is available
 - Never change public exports in `aspose/cells_foss/` package without verifying the API impact
 - Never add third-party dependencies without approval
@@ -42,9 +42,15 @@ When the task is larger, split it by:
 
 Key commands:
 ```bash
-go test ./examples -v
-go test ./examples/test_feature_test.go -v
+go test ./tests/ -v          # library test suite (run from the repo root)
+go test ./...                # includes tests/; examples/ is a separate module
+
+cd examples && go run ./basic/      # run a single example
+cd examples && go run ./load_modify_save/   # needs basic/ to have run first
 ```
+
+`examples/` is its own module holding `main` packages, so it is exercised with
+`go run ./<name>/`, not `go test`. Examples write to `examples/outputfiles/`.
 
 ## Boundaries
 
@@ -69,37 +75,39 @@ go test ./examples/test_feature_test.go -v
 ## Project Structure
 
 ```
+doc.go                          # Root package doc (pkg.go.dev indexing only)
 aspose/cells_foss/              # Library source code (canonical location)
   workbook.go                   # Workbook entry point and save/load dispatch
   worksheet.go                  # Worksheet model
   cell.go / cells.go            # Cell model and A1-keyed collection
   style.go                      # Font, fill, border, alignment, number format
-  chart.go                      # Chart models and enums
-  picture.go / shape.go         # Drawing objects
+  picture.go                    # Drawing objects
   table.go                      # Excel table support
-  sparkline.go                  # Sparkline support
   datavalidation.go             # Validation models and enums
-  autofilter.go                 # Filter models
-  documentproperties.go         # Core and extended document properties
-  workbookproperties.go         # Workbook-level settings and protection
-  csvhandler.go                 # CSV import/export
-  markdownhandler.go            # Markdown export
-  jsonhandler.go                # JSON export
-  xmlloader.go                  # Workbook XML loading
-  xmlsaver.go                   # Workbook XML saving
-  xml_feature_loader.go         # Feature-specific XML loaders
-  xml_feature_saver.go          # Feature-specific XML savers
-examples/                       # Executable example tests for library features
-  outputfiles/                  # Output from examples/ tests
+  csv_handler.go                # CSV import/export
+  formula_engine.go             # SUM/AVERAGE/MAX/MIN evaluation
+  streaming_reader.go           # Row-by-row reader for large files
+  crypto.go                     # Encrypted workbooks (Agile Encryption)
+  xmlloader.go                  # Workbook/sheet/rels XML loading
+  xmlsaver.go                   # Workbook and sheet XML saving
+  xml_feature_loader.go         # styles.xml and table XML loading
+  xml_feature_saver.go          # styles.xml, tables, drawings, validations
+  xml_sharedstrings_loader.go   # sharedStrings.xml loading
+  test_helpers.go               # Helpers exported for tests/ (not stable API)
+examples/                       # Executable usage coverage (separate module, main packages)
+  outputfiles/                  # Output from examples/ (gitignored, never commit)
+tests/                          # Library test suite (external test package)
+verify/check_open_xlsx.go       # Standalone .xlsx structure validator
+docs/usage.md                   # Usage guide
 ```
 
 ## Tech Stack
 
-- **Language**: Go 1.18+
+- **Language**: Go 1.24.5 (see `go.mod`)
 - **Workbook format**: .xlsx / ECMA-376 Open XML
 - **XML**: `encoding/xml`
 - **Archives**: `archive/zip`
-- **Testing**: `testing` package, `testify` for assertions
+- **Testing**: `testing` package only — no third-party assertion library
 - **Excel verification**: via `verify/check_open_xlsx.go`
 
 ## Code Examples
@@ -108,13 +116,16 @@ examples/                       # Executable example tests for library features
 ```go
 wb := NewWorkbook()
 ws := wb.Worksheets[0]
-ws.Cells["A1"].Value = "Revenue"
-ws.Cells["B2"].Value = 42
+ws.Cells().Set("A1", "Revenue")
+ws.Cells().Set("B2", 42)
+
+cell, err := ws.Cells().Get("A1")   // errors when the cell does not exist
+fmt.Println(cell.Value)
 ```
 
 ### Bad cell access
 ```go
-ws.Cells[0][0].Value = "Revenue"  // Don't use tuple/array indices
+ws.Cells()[0][0].Value = "Revenue"  // Don't use tuple/array indices
 ```
 
 ### Good feature extension pattern
@@ -129,15 +140,17 @@ ws.Cells[0][0].Value = "Revenue"  // Don't use tuple/array indices
 package main
 
 import (
-    "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26"
+    "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss"
 )
 
 func main() {
     wb := cells_foss.NewWorkbook()
     ws := wb.Worksheets[0]
-    dv := ws.DataValidations.Add("A1:A10")
-    dv.Type = cells_foss.DataValidationTypeList
-    dv.Formula1 = `"Yes,No"`
+    dv := &cells_foss.DataValidation{
+        Type:     cells_foss.DataValidationTypeList,
+        Formula1: `"Yes,No"`,
+    }
+    ws.AddDataValidation("A1:A10", dv)
     wb.Save("outputfiles/example.xlsx")
 }
 ```
@@ -149,6 +162,29 @@ func main() {
 - [ ] `examples/` still reflects the current API
 - [ ] Public exports in `aspose/cells_foss/` package are correct
 - [ ] No generated `.xlsx` files or `outputfiles/` artifacts are included
+
+## Known Limitations
+
+Do not assume these already work; they are documented so that decisions are not
+made from misleading descriptions.
+
+- **Encrypted files are not Excel-readable.** `Workbook.SetPassword` wraps the
+  package in a custom `ECRX`-magic container (`aspose/cells_foss/crypto.go`),
+  not the OLE/CFB container Excel uses. Only this library can read the result.
+  The key derivation itself is standard ECMA-376 Agile Encryption.
+- **Passwords are held in plaintext** and compared with `==`; `VerifyPassword`
+  returns `true` for any input when no password is set.
+- **Numbers load as strings.** `resolveCellValue` returns the raw `<v>` text for
+  cells without a `t` attribute, so a numeric cell reads back as `"42"`, not
+  `42`. Saving then writes it as a shared string rather than a number.
+- **Only the first worksheet caches its source XML.** `Workbook.SourceXML` is
+  populated for sheet 1 only, and cleared after Save, so sheets 2+ are always
+  regenerated when saving.
+- **Pictures are write-only.** There is no drawing/picture loading, and drawing
+  and media part names are only correct for a single-sheet workbook.
+- **`test_helpers.go` exports are unstable.** `WriteTestXLSX`,
+  `ReadTestZipEntry`, and `MinimalPNG` exist for `tests/`; they are not part of
+  the supported API.
 
 ## When Stuck
 
