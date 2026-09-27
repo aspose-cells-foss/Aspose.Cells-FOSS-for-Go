@@ -183,9 +183,9 @@ func cellToFloat(cell *Cell) (float64, error) {
 // Column conversion
 // ---------------------------------------------------------------------------
 
-// colToNum converts a column letter (or letters) to a zero-based index.
+// ColToNum converts a column letter (or letters) to a zero-based index.
 // "A" → 0, "B" → 1, …, "Z" → 25, "AA" → 26.
-func colToNum(col string) int {
+func ColToNum(col string) int {
 	col = strings.ToUpper(col)
 	n := 0
 	for _, ch := range col {
@@ -194,9 +194,9 @@ func colToNum(col string) int {
 	return n - 1
 }
 
-// numToCol converts a zero-based column index to letters.
+// NumToCol converts a zero-based column index to letters.
 // 0 → "A", 25 → "Z", 26 → "AA".
-func numToCol(n int) string {
+func NumToCol(n int) string {
 	var out strings.Builder
 	n++ // convert to 1-based for the algorithm
 	for n > 0 {
@@ -211,6 +211,16 @@ func numToCol(n int) string {
 		runes[i], runes[j] = runes[j], runes[i]
 	}
 	return string(runes)
+}
+
+// colToNum is the internal alias for backward compatibility.
+func colToNum(col string) int {
+	return ColToNum(col)
+}
+
+// numToCol is the internal alias for backward compatibility.
+func numToCol(n int) string {
+	return NumToCol(n)
 }
 
 // ---------------------------------------------------------------------------
