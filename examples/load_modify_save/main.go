@@ -29,12 +29,14 @@ func main() {
 	fmt.Printf("Loaded worksheet: %q\n", ws.Name)
 
 	// Read the existing value at A1.
+	// Use AsString() for type-safe access — cell.Value may hold float64
+	// for numeric cells, so cell.Value.(string) can panic.
 	cell, err := ws.Cells().Get("A1")
 	if err != nil {
 		fmt.Printf("Error reading A1: %v\n", err)
 		return
 	}
-	fmt.Printf("Original A1 = %v\n", cell.Value)
+	fmt.Printf("Original A1 = %s\n", cell.AsString())
 
 	// Modify A1.
 	if err := ws.Cells().Set("A1", "World"); err != nil {
@@ -55,5 +57,5 @@ func main() {
 	// Verify the change survived the round-trip.
 	reloaded, _ := cells_foss.Load(outPath)
 	c, _ := reloaded.Worksheets[0].Cells().Get("A1")
-	fmt.Printf("Reloaded A1 = %v\n", c.Value)
+	fmt.Printf("Reloaded A1 = %s\n", c.AsString())
 }
