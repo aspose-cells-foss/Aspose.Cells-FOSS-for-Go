@@ -48,16 +48,16 @@ func (sr *StreamingReader) ProcessRows(sheetName string, callback RowCallback) e
 	defer r.Close()
 
 	// 2. Load shared strings (small — fits in memory even for huge workbooks).
-	sharedStrings, _ := loadSharedStrings(r)
+	sharedStrings, _ := loadSharedStrings(&r.Reader)
 
 	// 3. Resolve sheet path.
-	sheetPath, err := resolveStreamSheetPath(r, sheetName)
+	sheetPath, err := resolveStreamSheetPath(&r.Reader, sheetName)
 	if err != nil {
 		return fmt.Errorf("streaming reader: %w", err)
 	}
 
 	// 4. Open the sheet XML stream.
-	rc, err := openZipEntry(r, sheetPath)
+	rc, err := openZipEntry(&r.Reader, sheetPath)
 	if err != nil {
 		return fmt.Errorf("streaming reader: cannot open %s: %w", sheetPath, err)
 	}
@@ -194,44 +194,25 @@ func parseStreamCell(decoder *xml.Decoder, cellStart xml.StartElement, ss map[in
 
 // resolveStreamSheetPath maps a sheet name (or empty string for the first
 // sheet) to the ZIP entry path like "xl/worksheets/sheet1.xml".
-func resolveStreamSheetPath(r *zip.ReadCloser, sheetName string) (string, error) {
-	type relTarget struct {
-		name   string
-		target string
-	}
-
-	// Parse workbook.xml to get sheet → rId mapping.
-	wbRaw, err := readZipFile(r, "xl/workbook.xml")
+func resolveStreamSheetPath(zr *zip.Reader, sheetName string) (string, error) {
+	sheetDefs, err := parseWorkbookXML(zr)
 	if err != nil {
 		return "", fmt.Errorf("cannot read workbook.xml: %w", err)
 	}
-
-	var wb struct {
-		Sheets struct {
-			Sheet []struct {
-				Name string `xml:"name,attr"`
-				RID  string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships id,attr"`
-			} `xml:"sheet"`
-		} `xml:"sheets"`
-	}
-	if err := xml.Unmarshal(wbRaw, &wb); err != nil {
-		return "", fmt.Errorf("cannot parse workbook.xml: %w", err)
-	}
-
-	if len(wb.Sheets.Sheet) == 0 {
+	if len(sheetDefs) == 0 {
 		return "", fmt.Errorf("no sheets in workbook")
 	}
 
 	// Default to the first sheet.
 	if sheetName == "" {
-		sheetName = wb.Sheets.Sheet[0].Name
+		sheetName = sheetDefs[0].Name
 	}
 
 	// Find the rId for the named sheet.
 	var targetRID string
-	for _, s := range wb.Sheets.Sheet {
-		if strings.EqualFold(s.Name, sheetName) {
-			targetRID = s.RID
+	for _, def := range sheetDefs {
+		if strings.EqualFold(def.Name, sheetName) {
+			targetRID = def.RID
 			break
 		}
 	}
@@ -239,40 +220,27 @@ func resolveStreamSheetPath(r *zip.ReadCloser, sheetName string) (string, error)
 		return "", fmt.Errorf("sheet %q not found", sheetName)
 	}
 
-	// Parse relationships to resolve rId → target.
-	relsRaw, err := readZipFile(r, "xl/_rels/workbook.xml.rels")
+	rels, err := parseWorkbookRels(zr)
 	if err != nil {
-		// Fall back to sequential naming.
-		for i, s := range wb.Sheets.Sheet {
-			if strings.EqualFold(s.Name, sheetName) {
+		// No relationships part — fall back to sequential part naming.
+		for i, def := range sheetDefs {
+			if strings.EqualFold(def.Name, sheetName) {
 				return fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1), nil
 			}
 		}
 		return "", fmt.Errorf("cannot resolve sheet path for %q", sheetName)
 	}
 
-	var rels struct {
-		Rels []struct {
-			ID     string `xml:"Id,attr"`
-			Target string `xml:"Target,attr"`
-		} `xml:"Relationship"`
-	}
-	if err := xml.Unmarshal(relsRaw, &rels); err != nil {
-		return "", fmt.Errorf("cannot parse relationships: %w", err)
-	}
-
-	for _, rel := range rels.Rels {
-		if rel.ID == targetRID {
-			return "xl/" + rel.Target, nil
-		}
+	if target, ok := rels[targetRID]; ok {
+		return "xl/" + target, nil
 	}
 
 	return "", fmt.Errorf("no relationship found for rId %q", targetRID)
 }
 
 // openZipEntry opens a named file from the ZIP archive for reading.
-func openZipEntry(r *zip.ReadCloser, name string) (io.ReadCloser, error) {
-	for _, f := range r.File {
+func openZipEntry(zr *zip.Reader, name string) (io.ReadCloser, error) {
+	for _, f := range zr.File {
 		if f.Name == name {
 			return f.Open()
 		}

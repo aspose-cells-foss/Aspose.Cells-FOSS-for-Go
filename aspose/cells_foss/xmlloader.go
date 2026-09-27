@@ -16,8 +16,8 @@ import (
 // ---------------------------------------------------------------------------
 
 type xmlWorkbook struct {
-	XMLName xml.Name   `xml:"workbook"`
-	Sheets  xmlSheets  `xml:"sheets"`
+	XMLName xml.Name  `xml:"workbook"`
+	Sheets  xmlSheets `xml:"sheets"`
 }
 
 type xmlSheets struct {
@@ -38,8 +38,8 @@ type xmlSheet struct {
 // ---------------------------------------------------------------------------
 
 type xmlRelationships struct {
-	XMLName xml.Name           `xml:"Relationships"`
-	Rels    []xmlRelationship  `xml:"Relationship"`
+	XMLName xml.Name          `xml:"Relationships"`
+	Rels    []xmlRelationship `xml:"Relationship"`
 }
 
 type xmlRelationship struct {
@@ -52,13 +52,13 @@ type xmlRelationship struct {
 // ---------------------------------------------------------------------------
 
 type xmlWorksheet struct {
-	XMLName         xml.Name          `xml:"worksheet"`
-	SheetData       xmlSheetData      `xml:"sheetData"`
+	XMLName         xml.Name            `xml:"worksheet"`
+	SheetData       xmlSheetData        `xml:"sheetData"`
 	DataValidations *xmlDataValidations `xml:"dataValidations"`
 }
 
 type xmlDataValidations struct {
-	Count int               `xml:"count,attr"`
+	Count int                 `xml:"count,attr"`
 	DVs   []xmlDataValidation `xml:"dataValidation"`
 }
 
@@ -79,7 +79,7 @@ type xmlSheetData struct {
 }
 
 type xmlRow struct {
-	R     int      `xml:"r,attr"`
+	R     int       `xml:"r,attr"`
 	Cells []xmlCell `xml:"c"`
 }
 
@@ -153,48 +153,28 @@ func LoadWithPassword(path string, password string) (*Workbook, error) {
 // loadWorkbookFromBytes is the shared loading logic used by both
 // LoadWorkbook and LoadWithPassword.
 func loadWorkbookFromBytes(data []byte, path string) (*Workbook, error) {
-	br := bytes.NewReader(data)
-	r, err := zip.NewReader(br, int64(len(data)))
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		return nil, fmt.Errorf("loading workbook: %w", err)
 	}
-
-	// We need a zip.ReadCloser-like interface, but zip.NewReader returns
-	// *zip.Reader (not ReadCloser).  Adapt the helpers.
-	return loadWorkbookFromReader(r, path)
+	return loadWorkbookFromReader(zr, path)
 }
-
-// zipReadCloserAdapter wraps a zip.Reader to satisfy the zip.ReadCloser
-// interface used by the helper functions.
-type zipReadCloserAdapter struct {
-	*zip.Reader
-	files map[string]*zip.File
-}
-
-func (a *zipReadCloserAdapter) Close() error { return nil }
 
 func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
-	// Build a compatible adapter.
-	adapter := &zipReadCloserAdapter{
-		Reader: zr,
-	}
-	// Populate adapter.File from zr.File (both are []*zip.File).
-	adapter.File = zr.File
-
 	// 1. Resolve sheet file paths via relationships.
-	sheetPathByRID, err := parseWorkbookRelsFromReader(adapter)
+	sheetPathByRID, err := parseWorkbookRels(zr)
 	if err != nil {
 		return nil, fmt.Errorf("loading workbook: %w", err)
 	}
 
 	// 2. Parse workbook.xml.
-	sheetDefs, err := parseWorkbookXMLFromReader(adapter)
+	sheetDefs, err := parseWorkbookXML(zr)
 	if err != nil {
 		return nil, fmt.Errorf("loading workbook: %w", err)
 	}
 
 	// 3. Load shared strings.
-	sharedStrings, _ := loadSharedStringsFromReader(adapter)
+	sharedStrings, _ := loadSharedStrings(zr)
 
 	// 4. Build worksheets.
 	worksheets := make([]*Worksheet, 0, len(sheetDefs))
@@ -207,7 +187,7 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 		}
 
 		fullPath := "xl/" + relPath
-		ws, rawXML, err := parseWorksheetXMLFromReader(adapter, fullPath, sharedStrings)
+		ws, rawXML, err := parseWorksheetXML(zr, fullPath, sharedStrings)
 		if err != nil {
 			return nil, fmt.Errorf("loading workbook: parsing sheet %q: %w", def.Name, err)
 		}
@@ -227,12 +207,12 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 	}
 
 	// 5. Load styles.
-	stylesRaw, _ := loadStylesFromReader(adapter, wb)
+	stylesRaw, _ := loadStyles(zr, wb)
 	wb.StylesXML = stylesRaw
 
 	// 6. Load tables.
 	for i := range wb.Worksheets {
-		tables, _ := loadTablesFromReader(adapter, i)
+		tables, _ := loadTables(zr, i)
 		wb.Worksheets[i].Tables = tables
 	}
 
@@ -244,23 +224,8 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 	return wb, nil
 }
 
-// Reader-based versions of the helper functions (work with *zip.ReadCloser adapter).
-func readZipFileFromReader(r *zipReadCloserAdapter, name string) ([]byte, error) {
-	for _, f := range r.File {
-		if f.Name == name {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return io.ReadAll(rc)
-		}
-	}
-	return nil, fmt.Errorf("file %q not found in archive", name)
-}
-
-func parseWorkbookRelsFromReader(r *zipReadCloserAdapter) (map[string]string, error) {
-	raw, err := readZipFileFromReader(r, "xl/_rels/workbook.xml.rels")
+func parseWorkbookRels(zr *zip.Reader) (map[string]string, error) {
+	raw, err := readZipFile(zr, "xl/_rels/workbook.xml.rels")
 	if err != nil {
 		return nil, fmt.Errorf("cannot read workbook relationships: %w", err)
 	}
@@ -275,8 +240,8 @@ func parseWorkbookRelsFromReader(r *zipReadCloserAdapter) (map[string]string, er
 	return out, nil
 }
 
-func parseWorkbookXMLFromReader(r *zipReadCloserAdapter) ([]sheetDef, error) {
-	raw, err := readZipFileFromReader(r, "xl/workbook.xml")
+func parseWorkbookXML(zr *zip.Reader) ([]sheetDef, error) {
+	raw, err := readZipFile(zr, "xl/workbook.xml")
 	if err != nil {
 		return nil, fmt.Errorf("cannot read workbook.xml: %w", err)
 	}
@@ -291,8 +256,8 @@ func parseWorkbookXMLFromReader(r *zipReadCloserAdapter) ([]sheetDef, error) {
 	return defs, nil
 }
 
-func parseWorksheetXMLFromReader(r *zipReadCloserAdapter, fullPath string, ss map[int]string) (*Worksheet, []byte, error) {
-	raw, err := readZipFileFromReader(r, fullPath)
+func parseWorksheetXML(zr *zip.Reader, fullPath string, ss map[int]string) (*Worksheet, []byte, error) {
+	raw, err := readZipFile(zr, fullPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read %s: %w", fullPath, err)
 	}
@@ -332,100 +297,6 @@ func parseWorksheetXMLFromReader(r *zipReadCloserAdapter, fullPath string, ss ma
 		}
 	}
 	return ws, raw, nil
-}
-
-func loadSharedStringsFromReader(r *zipReadCloserAdapter) (map[int]string, error) {
-	raw, err := readZipFileFromReader(r, "xl/sharedStrings.xml")
-	if err != nil {
-		return map[int]string{}, nil
-	}
-	var sst xmlSST
-	if err := xml.Unmarshal(raw, &sst); err != nil {
-		return nil, fmt.Errorf("shared strings: %w", err)
-	}
-	out := make(map[int]string, len(sst.Items))
-	for i, si := range sst.Items {
-		out[i] = resolveSIText(si)
-	}
-	return out, nil
-}
-
-func loadStylesFromReader(r *zipReadCloserAdapter, wb *Workbook) ([]byte, error) {
-	raw, err := readZipFileFromReader(r, "xl/styles.xml")
-	if err != nil {
-		wb.styles = []*Style{DefaultStyle()}
-		return nil, nil
-	}
-	var ss xmlStyleSheet
-	if err := xml.Unmarshal(raw, &ss); err != nil {
-		return nil, fmt.Errorf("cannot parse styles.xml: %w", err)
-	}
-	fonts := parseFonts(ss.Fonts.Fonts)
-	fills := parseFills(ss.Fills.Fills)
-	borders := parseBorders(ss.Borders.Borders)
-	styles := make([]*Style, 0, len(ss.CellXfs.Xfs))
-	for _, xf := range ss.CellXfs.Xfs {
-		st := DefaultStyle()
-		if xf.FontId >= 0 && xf.FontId < len(fonts) {
-			st.Font = fonts[xf.FontId]
-		}
-		if xf.FillId >= 0 && xf.FillId < len(fills) {
-			st.Fill = fills[xf.FillId]
-		}
-		if xf.BorderId >= 0 && xf.BorderId < len(borders) {
-			st.Border = borders[xf.BorderId]
-		}
-		if xf.Alignment != nil {
-			st.Alignment = &Alignment{
-				Horizontal: xf.Alignment.Horizontal,
-				Vertical:   xf.Alignment.Vertical,
-				WrapText:   xf.Alignment.WrapText == 1,
-			}
-		}
-		styles = append(styles, st)
-	}
-	if len(styles) == 0 {
-		styles = append(styles, DefaultStyle())
-	}
-	wb.styles = styles
-	return raw, nil
-}
-
-func loadTablesFromReader(r *zipReadCloserAdapter, sheetIndex int) ([]*Table, error) {
-	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
-	relsRaw, err := readZipFileFromReader(r, relsPath)
-	if err != nil {
-		return nil, nil
-	}
-	var rels xmlRelationships
-	if err := xml.Unmarshal(relsRaw, &rels); err != nil {
-		return nil, fmt.Errorf("cannot parse %s: %w", relsPath, err)
-	}
-	var tables []*Table
-	for _, rel := range rels.Rels {
-		if !strings.Contains(rel.Target, "tables/") {
-			continue
-		}
-		parts := strings.Split(rel.Target, "/")
-		fileName := parts[len(parts)-1]
-		simplePath := "xl/tables/" + fileName
-		raw, err := readZipFileFromReader(r, simplePath)
-		if err != nil {
-			continue
-		}
-		var xt xmlTable
-		if err := xml.Unmarshal(raw, &xt); err != nil {
-			continue
-		}
-		t := &Table{
-			Name:         xt.Name,
-			Range:        xt.Ref,
-			HasHeaderRow: xt.HeaderRowCount > 0,
-			StyleName:    "TableStyleMedium9",
-		}
-		tables = append(tables, t)
-	}
-	return tables, nil
 }
 
 // sheetDef holds the parsed metadata for a single sheet from workbook.xml.
@@ -468,12 +339,9 @@ func resolveCellValue(c xmlCell, ss map[int]string) interface{} {
 	return c.V
 }
 
-// ---------------------------------------------------------------------------
-// Helper: read a single file from the ZIP archive into a []byte
-// ---------------------------------------------------------------------------
-
-func readZipFile(r *zip.ReadCloser, name string) ([]byte, error) {
-	for _, f := range r.File {
+// readZipFile reads a named entry from the zip archive into memory.
+func readZipFile(zr *zip.Reader, name string) ([]byte, error) {
+	for _, f := range zr.File {
 		if f.Name == name {
 			rc, err := f.Open()
 			if err != nil {

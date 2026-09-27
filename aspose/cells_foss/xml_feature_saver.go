@@ -13,12 +13,12 @@ import (
 // ======================================================================
 
 type outStyleSheet struct {
-	XMLName      xml.Name       `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main styleSheet"`
-	Fonts        outFonts       `xml:"fonts"`
-	Fills        outFills       `xml:"fills"`
-	Borders      outBorders     `xml:"borders"`
-	CellStyleXfs outCellXfs     `xml:"cellStyleXfs"`
-	CellXfs      outCellXfs     `xml:"cellXfs"`
+	XMLName      xml.Name   `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main styleSheet"`
+	Fonts        outFonts   `xml:"fonts"`
+	Fills        outFills   `xml:"fills"`
+	Borders      outBorders `xml:"borders"`
+	CellStyleXfs outCellXfs `xml:"cellStyleXfs"`
+	CellXfs      outCellXfs `xml:"cellXfs"`
 }
 
 type outFonts struct {
@@ -441,23 +441,6 @@ func splitRange(ref string) []string {
 	return parts
 }
 
-// generateSheetRelsXML produces xl/worksheets/_rels/sheetN.xml.rels with
-// table relationships when the sheet contains tables.
-func generateSheetRelsXML(tables []*Table) string {
-	if len(tables) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
-	b.WriteString(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` + "\n")
-	for i, t := range tables {
-		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/%s.xml"/>`+"\n",
-			i+1, strings.ToLower(t.Name))
-	}
-	b.WriteString(`</Relationships>` + "\n")
-	return b.String()
-}
-
 // generateContentTypesForTables returns additional <Override> elements for
 // each table part that should appear in [Content_Types].xml.
 func generateContentTypesForTables(worksheets []*Worksheet) string {
@@ -555,9 +538,9 @@ type outDrawing struct {
 }
 
 type outAnchor struct {
-	From       outPos      `xml:"from"`
-	To         outPos      `xml:"to"`
-	Pic        outPic      `xml:"pic"`
+	From       outPos        `xml:"from"`
+	To         outPos        `xml:"to"`
+	Pic        outPic        `xml:"pic"`
 	ClientData outClientData `xml:"clientData"`
 }
 
@@ -587,7 +570,7 @@ type outCNvPr struct {
 type outCNvPicPr struct{}
 
 type outBlipFill struct {
-	Blip    outBlip   `xml:"http://schemas.openxmlformats.org/drawingml/2006/main blip"`
+	Blip    outBlip    `xml:"http://schemas.openxmlformats.org/drawingml/2006/main blip"`
 	Stretch outStretch `xml:"http://schemas.openxmlformats.org/drawingml/2006/main stretch"`
 }
 
@@ -602,7 +585,7 @@ type outStretch struct {
 type outFillRect struct{}
 
 type outSpPr struct {
-	Xfrm    outXfrm    `xml:"http://schemas.openxmlformats.org/drawingml/2006/main xfrm"`
+	Xfrm     outXfrm     `xml:"http://schemas.openxmlformats.org/drawingml/2006/main xfrm"`
 	PrstGeom outPrstGeom `xml:"http://schemas.openxmlformats.org/drawingml/2006/main prstGeom"`
 }
 
@@ -617,7 +600,7 @@ type outPoint struct {
 }
 
 type outPrstGeom struct {
-	Prst string    `xml:"prst,attr"`
+	Prst  string   `xml:"prst,attr"`
 	AvLst outAvLst `xml:"avLst"`
 }
 
@@ -708,8 +691,9 @@ func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture) string {
 		rid++
 	}
 	if len(pictures) > 0 {
-		// The drawing file is named drawingN.xml; we use the first picture's
-		// sheet context.  Each sheet has exactly one drawing file.
+		// A sheet has at most one drawing part. The name is fixed because
+		// pictures are only ever produced for the first worksheet; see
+		// SaveWorkbook's per-sheet drawing numbering.
 		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>`+"\n", rid)
 	}
 
@@ -718,13 +702,10 @@ func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture) string {
 }
 
 // drawingRID returns the rId that the <drawing> element in the sheet XML
-// should reference, or empty when there are no pictures.  This is always
-// len(tables)+1 because tables occupy rIds 1..N.
+// should reference.  Callers only use it for sheets that have pictures, and
+// tables occupy rIds 1..N, so the drawing always takes the next one.
 func drawingRID(tables []*Table) string {
-	if len(tables) > 0 {
-		return fmt.Sprintf("rId%d", len(tables)+1)
-	}
-	return "rId1"
+	return fmt.Sprintf("rId%d", len(tables)+1)
 }
 
 // generateContentTypesForDrawings returns <Override> elements for drawing

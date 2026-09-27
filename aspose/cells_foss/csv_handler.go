@@ -90,15 +90,17 @@ func (ws *Worksheet) ToCSV(delimiter rune) ([][]string, error) {
 		return [][]string{}, nil
 	}
 
-	// Determine the bounding box.
+	// Resolve every cell's grid position and the bounding box in one pass.
+	type placedCell struct {
+		row, col int
+		value    string
+	}
+	cells := make([]placedCell, 0, len(all))
 	maxRow, maxCol := 0, 0
-	type cellPos struct{ row, col int }
-	positions := make(map[string]cellPos, len(all))
-
-	for ref := range all {
-		colStr, row := splitRef(ref)
-		col := colToNum(colStr)
-		positions[ref] = cellPos{row, col}
+	for ref, cell := range all {
+		colName, row := splitRef(ref)
+		col := colToNum(colName)
+		cells = append(cells, placedCell{row: row, col: col, value: CellToString(cell.Value)})
 		if row > maxRow {
 			maxRow = row
 		}
@@ -113,9 +115,8 @@ func (ws *Worksheet) ToCSV(delimiter rune) ([][]string, error) {
 		grid[r] = make([]string, maxCol+1)
 	}
 
-	for ref, cell := range all {
-		pos := positions[ref]
-		grid[pos.row][pos.col] = CellToString(cell.Value)
+	for _, pc := range cells {
+		grid[pc.row][pc.col] = pc.value
 	}
 
 	// Trim leading empty rows (common when data starts at row 2 or later).

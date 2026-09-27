@@ -4,7 +4,7 @@ import (
 	"archive/zip"
 	"encoding/xml"
 	"fmt"
-	"io"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,8 +22,8 @@ type xmlSST struct {
 // xmlSI mirrors a <si> (string item) element. It supports the simple <t>
 // text form as well as the <r> rich-text runs form.
 type xmlSI struct {
-	Text      string    `xml:"t"`
-	Runs      []xmlRun  `xml:"r"`
+	Text string   `xml:"t"`
+	Runs []xmlRun `xml:"r"`
 }
 
 // xmlRun represents a single rich-text run <r> containing a <t> element.
@@ -37,27 +37,11 @@ type xmlRun struct {
 
 // loadSharedStrings reads xl/sharedStrings.xml from the ZIP archive and
 // returns a map from 0-based index to the resolved string value.
-// It returns an empty map (and no error) when the file is absent.
-func loadSharedStrings(r *zip.ReadCloser) (map[int]string, error) {
-	var raw []byte
-	for _, f := range r.File {
-		if f.Name == "xl/sharedStrings.xml" {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, fmt.Errorf("shared strings: %w", err)
-			}
-			defer rc.Close()
-			raw, err = io.ReadAll(rc)
-			if err != nil {
-				return nil, fmt.Errorf("shared strings: %w", err)
-			}
-			break
-		}
-	}
-
-	if raw == nil {
-		// No shared strings table — perfectly valid for workbooks that
-		// use inline values only.
+// It returns an empty map (and no error) when the file is absent, which is
+// valid for workbooks that use inline values only.
+func loadSharedStrings(zr *zip.Reader) (map[int]string, error) {
+	raw, err := readZipFile(zr, "xl/sharedStrings.xml")
+	if err != nil {
 		return map[int]string{}, nil
 	}
 
@@ -80,12 +64,12 @@ func resolveSIText(si xmlSI) string {
 	if si.Text != "" {
 		return si.Text
 	}
-	if len(si.Runs) > 0 {
-		var buf string
-		for _, run := range si.Runs {
-			buf += run.Text
-		}
-		return buf
+	if len(si.Runs) == 0 {
+		return ""
 	}
-	return ""
+	var buf strings.Builder
+	for _, run := range si.Runs {
+		buf.WriteString(run.Text)
+	}
+	return buf.String()
 }

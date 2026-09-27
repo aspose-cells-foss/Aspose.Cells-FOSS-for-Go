@@ -4,7 +4,7 @@ import (
 	"archive/zip"
 	"encoding/xml"
 	"fmt"
-	"io"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -14,12 +14,12 @@ import (
 // ======================================================================
 
 type xmlStyleSheet struct {
-	XMLName      xml.Name    `xml:"styleSheet"`
-	Fonts        xmlFonts    `xml:"fonts"`
-	Fills        xmlFills    `xml:"fills"`
-	Borders      xmlBorders  `xml:"borders"`
-	CellStyleXfs xmlXfs      `xml:"cellStyleXfs"`
-	CellXfs      xmlXfs      `xml:"cellXfs"`
+	XMLName      xml.Name   `xml:"styleSheet"`
+	Fonts        xmlFonts   `xml:"fonts"`
+	Fills        xmlFills   `xml:"fills"`
+	Borders      xmlBorders `xml:"borders"`
+	CellStyleXfs xmlXfs     `xml:"cellStyleXfs"`
+	CellXfs      xmlXfs     `xml:"cellXfs"`
 }
 
 type xmlFonts struct {
@@ -71,16 +71,16 @@ type xmlXfs struct {
 }
 
 type xmlXf struct {
-	NumFmtId       int          `xml:"numFmtId,attr"`
-	FontId         int          `xml:"fontId,attr"`
-	FillId         int          `xml:"fillId,attr"`
-	BorderId       int          `xml:"borderId,attr"`
-	XfId           int          `xml:"xfId,attr"`
-	ApplyFont      int          `xml:"applyFont,attr,omitempty"`
-	ApplyFill      int          `xml:"applyFill,attr,omitempty"`
-	ApplyBorder    int          `xml:"applyBorder,attr,omitempty"`
-	ApplyAlignment int          `xml:"applyAlignment,attr,omitempty"`
-	Alignment      *xmlAlign    `xml:"alignment"`
+	NumFmtId       int       `xml:"numFmtId,attr"`
+	FontId         int       `xml:"fontId,attr"`
+	FillId         int       `xml:"fillId,attr"`
+	BorderId       int       `xml:"borderId,attr"`
+	XfId           int       `xml:"xfId,attr"`
+	ApplyFont      int       `xml:"applyFont,attr,omitempty"`
+	ApplyFill      int       `xml:"applyFill,attr,omitempty"`
+	ApplyBorder    int       `xml:"applyBorder,attr,omitempty"`
+	ApplyAlignment int       `xml:"applyAlignment,attr,omitempty"`
+	Alignment      *xmlAlign `xml:"alignment"`
 }
 
 type xmlAlign struct {
@@ -101,74 +101,13 @@ type xmlVal struct {
 
 type xmlEmpty struct{}
 
-// ======================================================================
-// loadStyles
-// ======================================================================
-
-// loadStyles reads xl/styles.xml from the archive and populates the
-// Workbook's style registry.  It returns the raw bytes for caching so
-// unmodified workbooks can reuse the original XML.
-//
-// When xl/styles.xml is absent the workbook is seeded with the single
-// default style at index 0.
-func loadStyles(r *zip.ReadCloser, wb *Workbook) ([]byte, error) {
-	raw, err := readZipFile(r, "xl/styles.xml")
-	if err != nil {
-		// No styles.xml — seed the default style only.
-		wb.styles = []*Style{DefaultStyle()}
-		return nil, nil
-	}
-
-	var ss xmlStyleSheet
-	if err := xml.Unmarshal(raw, &ss); err != nil {
-		return nil, fmt.Errorf("cannot parse styles.xml: %w", err)
-	}
-
-	// Build lookups: index → parsed object.
-	fonts := parseFonts(ss.Fonts.Fonts)
-	fills := parseFills(ss.Fills.Fills)
-	borders := parseBorders(ss.Borders.Borders)
-
-	// Build Style for each cellXf entry.
-	styles := make([]*Style, 0, len(ss.CellXfs.Xfs))
-	for _, xf := range ss.CellXfs.Xfs {
-		st := DefaultStyle()
-
-		if xf.FontId >= 0 && xf.FontId < len(fonts) {
-			st.Font = fonts[xf.FontId]
-		}
-		if xf.FillId >= 0 && xf.FillId < len(fills) {
-			st.Fill = fills[xf.FillId]
-		}
-		if xf.BorderId >= 0 && xf.BorderId < len(borders) {
-			st.Border = borders[xf.BorderId]
-		}
-		if xf.Alignment != nil {
-			st.Alignment = &Alignment{
-				Horizontal: xf.Alignment.Horizontal,
-				Vertical:   xf.Alignment.Vertical,
-				WrapText:   xf.Alignment.WrapText == 1,
-			}
-		}
-
-		styles = append(styles, st)
-	}
-
-	if len(styles) == 0 {
-		styles = append(styles, DefaultStyle())
-	}
-	wb.styles = styles
-
-	return raw, nil
-}
-
 // parseFonts converts the parsed <font> elements into Font objects.
 func parseFonts(fonts []xmlFont) []*Font {
 	out := make([]*Font, len(fonts))
 	for i, f := range fonts {
 		ft := &Font{
-			Name:  f.Name.Val,
-			Bold:  f.Bold != nil,
+			Name:   f.Name.Val,
+			Bold:   f.Bold != nil,
 			Italic: f.Italic != nil,
 		}
 		if f.Size.Val != "" {
@@ -234,21 +173,63 @@ func resolveColor(c xmlColor) string {
 	return ""
 }
 
-// readZipBytes reads a named entry from the archive.  (Thin wrapper over
-// the same helper in xmlloader.go; duplicated to keep loading concerns
-// together.)
-func readZipBytes(r *zip.ReadCloser, name string) ([]byte, error) {
-	for _, f := range r.File {
-		if f.Name == name {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return io.ReadAll(rc)
-		}
+// ======================================================================
+// loadStyles
+// ======================================================================
+
+// loadStyles reads xl/styles.xml from the archive and populates the
+// Workbook's style registry.  It returns the raw bytes for caching so
+// unmodified workbooks can reuse the original XML.
+//
+// When xl/styles.xml is absent the workbook is seeded with the single
+// default style at index 0.
+func loadStyles(zr *zip.Reader, wb *Workbook) ([]byte, error) {
+	raw, err := readZipFile(zr, "xl/styles.xml")
+	if err != nil {
+		// No styles.xml — seed the default style only.
+		wb.styles = []*Style{DefaultStyle()}
+		return nil, nil
 	}
-	return nil, fmt.Errorf("file %q not found in archive", name)
+
+	var ss xmlStyleSheet
+	if err := xml.Unmarshal(raw, &ss); err != nil {
+		return nil, fmt.Errorf("cannot parse styles.xml: %w", err)
+	}
+
+	fonts := parseFonts(ss.Fonts.Fonts)
+	fills := parseFills(ss.Fills.Fills)
+	borders := parseBorders(ss.Borders.Borders)
+
+	styles := make([]*Style, 0, len(ss.CellXfs.Xfs))
+	for _, xf := range ss.CellXfs.Xfs {
+		st := DefaultStyle()
+
+		if xf.FontId >= 0 && xf.FontId < len(fonts) {
+			st.Font = fonts[xf.FontId]
+		}
+		if xf.FillId >= 0 && xf.FillId < len(fills) {
+			st.Fill = fills[xf.FillId]
+		}
+		if xf.BorderId >= 0 && xf.BorderId < len(borders) {
+			st.Border = borders[xf.BorderId]
+		}
+		if xf.Alignment != nil {
+			st.Alignment = &Alignment{
+				Horizontal: xf.Alignment.Horizontal,
+				Vertical:   xf.Alignment.Vertical,
+				WrapText:   xf.Alignment.WrapText == 1,
+			}
+		}
+
+		styles = append(styles, st)
+	}
+
+	if len(styles) == 0 {
+		styles = append(styles, DefaultStyle())
+	}
+	wb.styles = styles
+
+	return raw, nil
 }
 
 // ======================================================================
@@ -256,22 +237,22 @@ func readZipBytes(r *zip.ReadCloser, name string) ([]byte, error) {
 // ======================================================================
 
 type xmlTable struct {
-	XMLName        xml.Name        `xml:"table"`
-	ID             string          `xml:"id,attr"`
-	Name           string          `xml:"name,attr"`
-	DisplayName    string          `xml:"displayName,attr"`
-	Ref            string          `xml:"ref,attr"`
-	HeaderRowCount int             `xml:"headerRowCount,attr"`
+	XMLName        xml.Name `xml:"table"`
+	ID             string   `xml:"id,attr"`
+	Name           string   `xml:"name,attr"`
+	DisplayName    string   `xml:"displayName,attr"`
+	Ref            string   `xml:"ref,attr"`
+	HeaderRowCount int      `xml:"headerRowCount,attr"`
 }
 
-// loadTables reads table definitions for the given sheet index.  It first
-// looks for the sheet's rels file, discovers table relationships, then
-// parses the corresponding table XML files.
-func loadTables(r *zip.ReadCloser, sheetIndex int) ([]*Table, error) {
+// loadTables reads the table definitions for the given sheet index.  It looks
+// for the sheet's rels file, discovers table relationships, then parses the
+// corresponding table XML files.  A missing rels file means the sheet has no
+// tables; individual unresolvable tables are skipped.
+func loadTables(zr *zip.Reader, sheetIndex int) ([]*Table, error) {
 	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
-	relsRaw, err := readZipBytes(r, relsPath)
+	relsRaw, err := readZipFile(zr, relsPath)
 	if err != nil {
-		// No rels file — no tables.
 		return nil, nil
 	}
 
@@ -286,25 +267,12 @@ func loadTables(r *zip.ReadCloser, sheetIndex int) ([]*Table, error) {
 			continue
 		}
 
-		// Resolve the target path relative to xl/worksheets/.
-		tablePath := "xl/worksheets/" + rel.Target
-		// Normalise "../tables/table1.xml" → "xl/tables/table1.xml".
-		tablePath = strings.Replace(tablePath, "/../", "/", 1)
-		// Clean any remaining .. segments.
-		for strings.Contains(tablePath, "..") {
-			tablePath = strings.Replace(tablePath, "/../", "/", 1)
-		}
-		// Simpler normalisation: "../tables/" → just look for "xl/tables/".
-		parts := strings.Split(rel.Target, "/")
-		fileName := parts[len(parts)-1]
-		simplePath := "xl/tables/" + fileName
-
-		raw, err := readZipBytes(r, simplePath)
+		// Targets are relative to the rels file's directory, e.g.
+		// "../tables/table1.xml" resolves to "xl/tables/table1.xml".
+		tablePath := path.Clean(path.Join("xl/worksheets", rel.Target))
+		raw, err := readZipFile(zr, tablePath)
 		if err != nil {
-			raw, err = readZipBytes(r, tablePath)
-			if err != nil {
-				continue // skip unresolvable table
-			}
+			continue
 		}
 
 		var xt xmlTable
@@ -312,13 +280,12 @@ func loadTables(r *zip.ReadCloser, sheetIndex int) ([]*Table, error) {
 			continue
 		}
 
-		t := &Table{
+		tables = append(tables, &Table{
 			Name:         xt.Name,
 			Range:        xt.Ref,
 			HasHeaderRow: xt.HeaderRowCount > 0,
 			StyleName:    "TableStyleMedium9", // default; style parsing deferred
-		}
-		tables = append(tables, t)
+		})
 	}
 	return tables, nil
 }

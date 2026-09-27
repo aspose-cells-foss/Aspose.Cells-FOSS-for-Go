@@ -50,12 +50,10 @@ func NewPicture(data []byte, format string) *Picture {
 	if format == "jpg" {
 		format = "jpeg"
 	}
+	// Name is assigned by AddPicture once the picture belongs to a sheet.
 	return &Picture{
-		Data:    data,
-		Format:  format,
-		Name:    fmt.Sprintf("Picture %d", len(data)), // temporary; AddPicture reassigns
-		RowOff:  0,
-		ColOff:  0,
+		Data:   data,
+		Format: format,
 	}
 }
 

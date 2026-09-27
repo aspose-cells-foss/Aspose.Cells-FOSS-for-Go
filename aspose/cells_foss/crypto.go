@@ -18,11 +18,11 @@ import (
 // ---------------------------------------------------------------------------
 
 const (
-	spinCount      = 100000 // SHA-512 iteration count
-	saltSize       = 16     // bytes
-	keyBits        = 256    // AES-256
-	blockSize      = 16     // AES block size (128 bits)
-	hashSize       = 64     // SHA-512 output size (bytes)
+	spinCount          = 100000 // SHA-512 iteration count
+	saltSize           = 16     // bytes
+	keyBits            = 256    // AES-256
+	blockSize          = 16     // AES block size (128 bits)
+	hashSize           = 64     // SHA-512 output size (bytes)
 	encryptionInfoGUID = "{FF9A3F03-56EF-4613-BDD5-5A41C1D07246}"
 )
 
@@ -31,9 +31,9 @@ const (
 // ---------------------------------------------------------------------------
 
 type xmlEncryptionInfo struct {
-	XMLName        xml.Name          `xml:"encryption"`
-	KeyData        xmlKeyData        `xml:"keyData"`
-	KeyEncryptors  xmlKeyEncryptors  `xml:"keyEncryptors"`
+	XMLName       xml.Name         `xml:"encryption"`
+	KeyData       xmlKeyData       `xml:"keyData"`
+	KeyEncryptors xmlKeyEncryptors `xml:"keyEncryptors"`
 }
 
 type xmlKeyData struct {
@@ -52,21 +52,21 @@ type xmlKeyEncryptors struct {
 }
 
 type xmlKeyEncryptor struct {
-	URI              string              `xml:"uri,attr"`
-	EncryptedKey     xmlEncryptedKey     `xml:"encryptedKey"`
+	URI          string          `xml:"uri,attr"`
+	EncryptedKey xmlEncryptedKey `xml:"encryptedKey"`
 }
 
 type xmlEncryptedKey struct {
-	SpinCount            string `xml:"spinCount,attr"`
-	SaltSize             string `xml:"saltSize,attr"`
-	BlockSize            string `xml:"blockSize,attr"`
-	KeyBits              string `xml:"keyBits,attr"`
-	HashSize             string `xml:"hashSize,attr"`
-	CipherAlgorithm      string `xml:"cipherAlgorithm,attr"`
-	CipherChaining       string `xml:"cipherChaining,attr"`
-	HashAlgorithm        string `xml:"hashAlgorithm,attr"`
-	SaltValue            string `xml:"saltValue,attr"`
-	EncryptedKeyValue    string `xml:"encryptedKeyValue,attr"`
+	SpinCount              string `xml:"spinCount,attr"`
+	SaltSize               string `xml:"saltSize,attr"`
+	BlockSize              string `xml:"blockSize,attr"`
+	KeyBits                string `xml:"keyBits,attr"`
+	HashSize               string `xml:"hashSize,attr"`
+	CipherAlgorithm        string `xml:"cipherAlgorithm,attr"`
+	CipherChaining         string `xml:"cipherChaining,attr"`
+	HashAlgorithm          string `xml:"hashAlgorithm,attr"`
+	SaltValue              string `xml:"saltValue,attr"`
+	EncryptedKeyValue      string `xml:"encryptedKeyValue,attr"`
 	EncryptedVerifierValue string `xml:"encryptedVerifierValue,attr"`
 }
 
@@ -96,25 +96,9 @@ func deriveKey(password string, salt []byte, keyBits int) []byte {
 		hash = h.Sum(nil)
 	}
 
-	// If the hash is shorter than needed, continue with a different scheme.
-	// For 256-bit keys, SHA-512 (64 bytes) is more than enough.
-	need := keyBits / 8
-	if need > len(hash) {
-		// Append more bytes using the scheme:
-		// Hn = SHA512(Hn-1 || salt || password)
-		extra := make([]byte, 0, need)
-		extra = append(extra, hash...)
-		for len(extra) < need {
-			h.Reset()
-			h.Write(extra[len(extra)-hashSize:])
-			h.Write(salt)
-			h.Write(pwdBytes)
-			extra = append(extra, h.Sum(nil)...)
-		}
-		return extra[:need]
-	}
-
-	return hash[:need]
+	// SHA-512 yields hashSize (64) bytes, which covers every keyBits this
+	// package derives, so the hash is always long enough to truncate.
+	return hash[:keyBits/8]
 }
 
 // encodeUTF16LE converts a Go string to little-endian UTF-16.

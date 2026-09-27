@@ -16,9 +16,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type outWorkbookXML struct {
-	XMLName xml.Name   `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main workbook"`
-	R       string     `xml:"xmlns:r,attr"`
-	Sheets  outSheets  `xml:"sheets"`
+	XMLName xml.Name  `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main workbook"`
+	R       string    `xml:"xmlns:r,attr"`
+	Sheets  outSheets `xml:"sheets"`
 }
 
 type outSheets struct {
@@ -48,7 +48,7 @@ type outSheetData struct {
 }
 
 type outRow struct {
-	R     int      `xml:"r,attr"`
+	R     int       `xml:"r,attr"`
 	Cells []outCell `xml:"c"`
 }
 
@@ -244,15 +244,6 @@ func SaveWorkbook(wb *Workbook, path string) error {
 	return nil
 }
 
-// isWorkbookModified reports whether any cell in the workbook has been
-// changed since the last load or save.
-func isWorkbookModified(wb *Workbook) bool {
-	if wb == nil {
-		return false
-	}
-	return wb.Modified
-}
-
 // ---------------------------------------------------------------------------
 // OPC scaffolding (content types, package relationships)
 // ---------------------------------------------------------------------------
@@ -330,43 +321,39 @@ func generateWorkbookRelsXML(worksheets []*Worksheet) string {
 // sheet XML generation
 // ---------------------------------------------------------------------------
 
-// cellGroup holds cells grouped by their row number for ordered output.
-type cellGroup struct {
-	row   int
-	cells []*Cell
+// rowCell pairs a cell with its numeric column index, so that ordering by
+// column does not re-parse the A1 reference on every comparison.
+type rowCell struct {
+	col  int
+	cell *Cell
 }
 
 func generateSheetXML(ws *Worksheet, ssIndex map[string]int) string {
-	// Group cells by row.
-	rows := make(map[int][]*Cell)
+	// Group cells by row, parsing each A1 reference exactly once.
+	rows := make(map[int][]rowCell)
 	for _, c := range ws.cells.All() {
-		_, row := splitRef(c.Ref)
-		rows[row] = append(rows[row], c)
+		colName, row := splitRef(c.Ref)
+		rows[row] = append(rows[row], rowCell{col: colToNum(colName), cell: c})
 	}
 
-	// Sort rows.
-	groups := make([]cellGroup, 0, len(rows))
-	for r, cells := range rows {
-		groups = append(groups, cellGroup{row: r, cells: cells})
+	rowNums := make([]int, 0, len(rows))
+	for r := range rows {
+		rowNums = append(rowNums, r)
 	}
-	sort.Slice(groups, func(i, j int) bool { return groups[i].row < groups[j].row })
+	sort.Ints(rowNums)
 
-	// Build output rows with cells sorted by column within each row.
-	outRows := make([]outRow, 0, len(groups))
-	for _, g := range groups {
-		sort.Slice(g.cells, func(i, j int) bool {
-			ci, _ := splitRef(g.cells[i].Ref)
-			cj, _ := splitRef(g.cells[j].Ref)
-			return ci < cj
-		})
+	// Build output rows with cells in ascending column order.
+	outRows := make([]outRow, 0, len(rowNums))
+	for _, r := range rowNums {
+		cells := rows[r]
+		sort.Slice(cells, func(i, j int) bool { return cells[i].col < cells[j].col })
 
-		outCells := make([]outCell, 0, len(g.cells))
-		for _, c := range g.cells {
-			oc := cellToOutCell(c, ssIndex)
-			outCells = append(outCells, oc)
+		outCells := make([]outCell, 0, len(cells))
+		for _, rc := range cells {
+			outCells = append(outCells, cellToOutCell(rc.cell, ssIndex))
 		}
 
-		outRows = append(outRows, outRow{R: g.row, Cells: outCells})
+		outRows = append(outRows, outRow{R: r, Cells: outCells})
 	}
 
 	wsOut := outWorksheet{

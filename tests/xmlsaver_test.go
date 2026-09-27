@@ -2,7 +2,10 @@ package cells_foss_test
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"testing"
 
 	cells_foss "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss"
@@ -119,6 +122,49 @@ func TestSave_ResetsModifiedFlag(t *testing.T) {
 	wb.Save(p)
 	if wb.Modified {
 		t.Error("modified flag should be false after save")
+	}
+}
+
+// cellRefsInRow returns the A1 references of every <c> element in the given
+// row, in the order they appear in the saved sheet XML.
+func cellRefsInRow(t *testing.T, sheetXML []byte, row int) []string {
+	t.Helper()
+
+	rowPattern := regexp.MustCompile(fmt.Sprintf(`(?s)<row r="%d">(.*?)</row>`, row))
+	m := rowPattern.FindSubmatch(sheetXML)
+	if m == nil {
+		t.Fatalf("row %d not found in sheet XML: %s", row, sheetXML)
+	}
+
+	var refs []string
+	for _, c := range regexp.MustCompile(`<c r="([A-Z]+[0-9]+)"`).FindAllSubmatch(m[1], -1) {
+		refs = append(refs, string(c[1]))
+	}
+	return refs
+}
+
+// ECMA-376 expects cells within a row in ascending column order. Columns past
+// Z are where lexicographic comparison of the column letters ("AA" < "B")
+// diverges from numeric order, so cover that boundary explicitly.
+func TestSave_CellsAreInAscendingColumnOrder(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	for _, ref := range []string{"AB1", "B1", "AA1", "A1", "Z1"} {
+		if err := c.Set(ref, ref); err != nil {
+			t.Fatalf("Set(%q): %v", ref, err)
+		}
+	}
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "order.xlsx")
+	if err := wb.Save(p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got := cellRefsInRow(t, readRawSheetXML(t, p), 1)
+	want := []string{"A1", "B1", "Z1", "AA1", "AB1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("row 1 cells = %v, want %v", got, want)
 	}
 }
 
