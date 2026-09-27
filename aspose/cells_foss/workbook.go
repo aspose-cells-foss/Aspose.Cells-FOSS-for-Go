@@ -179,11 +179,13 @@ func NewWorkbook() *Workbook {
 		styles:   []*Style{DefaultStyle()},
 	}
 	ws := &Worksheet{
-		Name:  "Sheet1",
-		Index: 0,
-		cells: &Cells{},
+		Name:     "Sheet1",
+		Index:    0,
+		Modified: true,
+		cells:    &Cells{},
 	}
 	ws.cells.setParent(wb)
+	ws.cells.setWorksheet(ws)
 	wb.Worksheets = []*Worksheet{ws}
 	return wb
 }

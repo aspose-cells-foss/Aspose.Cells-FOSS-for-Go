@@ -140,9 +140,9 @@ func SaveWorkbook(wb *Workbook, path string) error {
 		sheetPath := fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1)
 
 		var sheetContent string
-		if !wb.Modified && ws.sourceXML != nil {
+		if !ws.Modified && ws.sourceXML != nil {
 			sheetContent = string(ws.sourceXML)
-		} else if !wb.Modified && wb.SourceXML != nil && i == 0 {
+		} else if !ws.Modified && !wb.Modified && wb.SourceXML != nil && i == 0 {
 			// Backward compatibility: older workbooks may only have
 			// Workbook.SourceXML set (from before per-sheet caching).
 			sheetContent = string(wb.SourceXML)
@@ -247,6 +247,7 @@ func SaveWorkbook(wb *Workbook, path string) error {
 	wb.Modified = false
 	wb.SourceXML = nil
 	for _, ws := range wb.Worksheets {
+		ws.Modified = false
 		ws.sourceXML = nil
 	}
 	wb.FilePath = path

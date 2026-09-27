@@ -220,6 +220,7 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 	// 7. Wire parent references.
 	for _, ws := range wb.Worksheets {
 		ws.cells.setParent(wb)
+		ws.cells.setWorksheet(ws)
 	}
 
 	return wb, nil

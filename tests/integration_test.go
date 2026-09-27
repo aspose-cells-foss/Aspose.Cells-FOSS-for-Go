@@ -617,3 +617,95 @@ func TestMultiSheet_SourceXMLPreserved(t *testing.T) {
 		t.Error("unmodified sheet2 should be byte-identical after save")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Per-sheet Modified tracking
+// ---------------------------------------------------------------------------
+
+func TestPerSheet_ModifiedFlag(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws1 := wb.Worksheets[0]
+
+	// New workbook: all sheets should be marked modified.
+	if !ws1.Modified {
+		t.Error("new sheet should be marked modified")
+	}
+
+	// Save resets the flag.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "mod.xlsx")
+	wb.Save(p)
+	if ws1.Modified {
+		t.Error("sheet should not be modified after save")
+	}
+
+	// Modifying a cell on sheet1 should mark only sheet1 as modified.
+	ws1.Cells().Set("A1", "data")
+	if !ws1.Modified {
+		t.Error("sheet should be marked modified after cell change")
+	}
+
+	// Add a second sheet via CSV import.
+	csvPath := filepath.Join(dir, "s2.csv")
+	os.WriteFile(csvPath, []byte("H\nV\n"), 0644)
+	wb.ImportFromCSV(csvPath, "Sheet2", ',')
+	ws2 := wb.Worksheets[1]
+
+	// Save to reset all flags.
+	p2 := filepath.Join(dir, "mod2.xlsx")
+	wb.Save(p2)
+	if ws1.Modified || ws2.Modified {
+		t.Error("both sheets should be clean after save")
+	}
+
+	// Modify only sheet1 — sheet2 should remain unmodified.
+	ws1.Cells().Set("B1", "changed")
+	if !ws1.Modified {
+		t.Error("sheet1 should be modified")
+	}
+	if ws2.Modified {
+		t.Error("sheet2 should NOT be modified when only sheet1 changed")
+	}
+
+	// Save: sheet2's sourceXML should be reused (byte-identical).
+	p3 := filepath.Join(dir, "mod3.xlsx")
+	wb.Save(p3)
+
+	sheet2Orig, _ := cells_foss.ReadTestZipEntry(p2, "xl/worksheets/sheet2.xml")
+	sheet2Saved, _ := cells_foss.ReadTestZipEntry(p3, "xl/worksheets/sheet2.xml")
+	if !bytes.Equal(sheet2Orig, sheet2Saved) {
+		t.Error("unmodified sheet2 should be byte-identical even when sheet1 is modified")
+	}
+}
+
+func TestPerSheet_AddOperations(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	dir := t.TempDir()
+	p := filepath.Join(dir, "ops.xlsx")
+	wb.Save(p)
+
+	if ws.Modified {
+		t.Error("should be clean after save")
+	}
+
+	// Each Add operation should mark the sheet modified.
+	ws.AddDataValidation("A1:A5", &cells_foss.DataValidation{
+		Type: cells_foss.DataValidationTypeList, Formula1: `"X"`,
+	})
+	if !ws.Modified {
+		t.Error("AddDataValidation should mark sheet modified")
+	}
+	ws.Modified = false
+
+	ws.AddTable("B1:B5")
+	if !ws.Modified {
+		t.Error("AddTable should mark sheet modified")
+	}
+	ws.Modified = false
+
+	ws.AddPicture(cells_foss.NewPicture(cells_foss.MinimalPNG(), "png"))
+	if !ws.Modified {
+		t.Error("AddPicture should mark sheet modified")
+	}
+}

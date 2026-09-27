@@ -75,6 +75,7 @@ func (ws *Worksheet) AddDataValidation(ref string, dv *DataValidation) error {
 	}
 	dv.Ref = ref
 	ws.DataValidations = append(ws.DataValidations, dv)
+	ws.Modified = true
 	if ws.cells != nil && ws.cells.wb != nil {
 		ws.cells.wb.Modified = true
 	}
@@ -88,6 +89,7 @@ func (ws *Worksheet) RemoveDataValidation(ref string) error {
 	for i, dv := range ws.DataValidations {
 		if dv.Ref == ref {
 			ws.DataValidations = append(ws.DataValidations[:i], ws.DataValidations[i+1:]...)
+			ws.Modified = true
 			if ws.cells != nil && ws.cells.wb != nil {
 				ws.cells.wb.Modified = true
 			}

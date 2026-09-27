@@ -66,11 +66,13 @@ func (wb *Workbook) ImportFromCSV(path string, sheetName string, delimiter rune)
 	// Create a new worksheet.
 	idx := len(wb.Worksheets)
 	ws := &Worksheet{
-		Name:  sheetName,
-		Index: idx,
-		cells: &Cells{},
+		Name:     sheetName,
+		Index:    idx,
+		Modified: true,
+		cells:    &Cells{},
 	}
 	ws.cells.setParent(wb)
+	ws.cells.setWorksheet(ws)
 
 	if err := ws.FromCSV(data, delimiter); err != nil {
 		return fmt.Errorf("csv import: %w", err)

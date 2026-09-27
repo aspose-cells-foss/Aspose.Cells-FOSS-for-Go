@@ -80,6 +80,7 @@ func (ws *Worksheet) AddPicture(pic *Picture) error {
 	pic.Name = fmt.Sprintf("Picture %d", len(ws.Pictures)+1)
 
 	ws.Pictures = append(ws.Pictures, pic)
+	ws.Modified = true
 	if ws.cells != nil && ws.cells.wb != nil {
 		ws.cells.wb.Modified = true
 	}

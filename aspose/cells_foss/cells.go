@@ -11,12 +11,22 @@ type Cells struct {
 	// wb is a back-reference to the owning Workbook, used to mark the
 	// workbook as modified when cell data changes.
 	wb *Workbook
+
+	// ws is a back-reference to the owning Worksheet, used to mark the
+	// sheet as modified when cell data changes (per-sheet tracking).
+	ws *Worksheet
 }
 
 // setParent wires the back-reference to the owning Workbook so that
 // mutations (Set, Remove) can automatically flag the workbook as modified.
 func (c *Cells) setParent(wb *Workbook) {
 	c.wb = wb
+}
+
+// setWorksheet wires the back-reference to the owning Worksheet so that
+// mutations can flag the sheet as modified (per-sheet tracking).
+func (c *Cells) setWorksheet(ws *Worksheet) {
+	c.ws = ws
 }
 
 // Get returns the Cell at the given A1 reference. An error is returned when
@@ -45,6 +55,9 @@ func (c *Cells) Set(ref string, value interface{}) error {
 	if c.wb != nil {
 		c.wb.Modified = true
 	}
+	if c.ws != nil {
+		c.ws.Modified = true
+	}
 	if cell, ok := c.cells[ref]; ok {
 		cell.Value = value
 		return nil
@@ -67,6 +80,9 @@ func (c *Cells) Remove(ref string) error {
 	delete(c.cells, ref)
 	if c.wb != nil {
 		c.wb.Modified = true
+	}
+	if c.ws != nil {
+		c.ws.Modified = true
 	}
 	return nil
 }

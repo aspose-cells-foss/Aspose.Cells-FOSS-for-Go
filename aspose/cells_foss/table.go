@@ -42,6 +42,7 @@ func (ws *Worksheet) AddTable(rangeRef string) *Table {
 	name := fmt.Sprintf("Table%d", len(ws.Tables)+1)
 	t := NewTable(name, rangeRef)
 	ws.Tables = append(ws.Tables, t)
+	ws.Modified = true
 	if ws.cells != nil && ws.cells.wb != nil {
 		ws.cells.wb.Modified = true
 	}
