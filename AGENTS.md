@@ -172,19 +172,24 @@ made from misleading descriptions.
   package in a custom `ECRX`-magic container (`aspose/cells_foss/crypto.go`),
   not the OLE/CFB container Excel uses. Only this library can read the result.
   The key derivation itself is standard ECMA-376 Agile Encryption.
-- **Passwords are held in plaintext** and compared with `==`; `VerifyPassword`
-  returns `true` for any input when no password is set.
-- **Numbers load as strings.** `resolveCellValue` returns the raw `<v>` text for
-  cells without a `t` attribute, so a numeric cell reads back as `"42"`, not
-  `42`. Saving then writes it as a shared string rather than a number.
-- **Only the first worksheet caches its source XML.** `Workbook.SourceXML` is
-  populated for sheet 1 only, and cleared after Save, so sheets 2+ are always
-  regenerated when saving.
-- **Pictures are write-only.** There is no drawing/picture loading, and drawing
-  and media part names are only correct for a single-sheet workbook.
-- **`test_helpers.go` exports are unstable.** `WriteTestXLSX`,
+  `SetPassword` is deprecated for this reason.
+- **Passwords are held in plaintext.** The old `VerifyPassword` returns `true`
+  for any input when no password is set and uses non-constant-time comparison.
+  Use `CheckPassword` instead — it returns `false` when no password is set and
+  uses `crypto/subtle.ConstantTimeCompare`.
+- **`Cell.Value` type varies.** After loading, numeric cells contain `float64`
+  (not `string`), so direct type assertions like `cell.Value.(string)` may
+  panic. Use `Cell.AsFloat64()`, `Cell.AsInt()`, or `Cell.AsString()` for
+  type-safe access. `Cell.Value` is deprecated in favor of these methods.
+- **The `Modified` flag is workbook-level.** Modifying any sheet marks the
+  entire workbook as modified, causing all sheets to be regenerated on save.
+  Per-sheet source XML caching (`Worksheet.sourceXML`) enables byte-identical
+  round-trip only when no sheet is modified.
+- **Pictures are write-only.** There is no drawing/picture loading. Multi-sheet
+  workbooks with pictures use correct per-sheet drawing and media part names.
+- **`test_helpers.go` exports are deprecated.** `WriteTestXLSX`,
   `ReadTestZipEntry`, and `MinimalPNG` exist for `tests/`; they are not part of
-  the supported API.
+  the supported API and are marked deprecated.
 
 ## When Stuck
 

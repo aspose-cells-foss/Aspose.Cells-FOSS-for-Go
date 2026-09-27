@@ -15,6 +15,9 @@ import (
 // given sheet XML and optional shared-strings XML into the appropriate ZIP
 // entries.  It is intended for use by integration tests that need to
 // construct specific edge-case .xlsx files without depending on the saver.
+//
+// Deprecated: This is a test helper, not part of the stable public API.
+// Use NewWorkbook + Cells().Set + Save for production code.
 func WriteTestXLSX(dst, sheetXML, sharedStringsXML string) error {
 	f, err := os.Create(dst)
 	if err != nil {
@@ -69,6 +72,8 @@ func writeZipEntry(w *zip.Writer, name, content string) {
 
 // ReadTestZipEntry opens an .xlsx file and returns the raw bytes of the
 // named ZIP entry (e.g. "xl/worksheets/sheet1.xml").
+//
+// Deprecated: This is a test helper, not part of the stable public API.
 func ReadTestZipEntry(path, entryName string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -99,6 +104,8 @@ func ReadTestZipEntry(path, entryName string) ([]byte, error) {
 }
 
 // MinimalPNG returns a valid 1×1 red PNG image as raw bytes.
+//
+// Deprecated: This is a test helper, not part of the stable public API.
 func MinimalPNG() []byte {
 	return []byte{
 		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,

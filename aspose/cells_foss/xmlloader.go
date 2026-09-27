@@ -193,6 +193,7 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 		}
 		ws.Name = def.Name
 		ws.Index = i
+		ws.sourceXML = rawXML
 		worksheets = append(worksheets, ws)
 
 		if i == 0 {
@@ -335,7 +336,19 @@ func resolveCellValue(c xmlCell, ss map[int]string) interface{} {
 		return false
 	}
 
-	// Numeric or untyped — return as string; callers may parse with strconv.
+	// String formula result or inline string — keep as string.
+	if c.T == "str" || c.T == "inlineStr" {
+		return c.V
+	}
+
+	// Numeric (no t attribute, or t="n") — parse as float64 to preserve
+	// round-trip fidelity: saving a float64 writes <v> without t="s",
+	// whereas a string would be written as a shared string.
+	if f, err := strconv.ParseFloat(c.V, 64); err == nil {
+		return f
+	}
+
+	// Fallback: non-numeric untyped value — return as string.
 	return c.V
 }
 

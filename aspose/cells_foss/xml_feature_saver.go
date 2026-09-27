@@ -657,7 +657,9 @@ func generateDrawingXML(pictures []*Picture, idBase int) string {
 }
 
 // generateDrawingRelsXML produces xl/drawings/_rels/drawingN.xml.rels.
-func generateDrawingRelsXML(pictures []*Picture) string {
+// globalPicIdx is the running picture counter so that media part names are
+// unique across all sheets in the workbook.
+func generateDrawingRelsXML(pictures []*Picture, globalPicIdx int) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
 	b.WriteString(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` + "\n")
@@ -667,7 +669,7 @@ func generateDrawingRelsXML(pictures []*Picture) string {
 			ext = "jpg"
 		}
 		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image%d.%s"/>`+"\n",
-			i+1, i+1, ext)
+			i+1, globalPicIdx+i+1, ext)
 	}
 	b.WriteString(`</Relationships>` + "\n")
 	return b.String()
@@ -676,7 +678,8 @@ func generateDrawingRelsXML(pictures []*Picture) string {
 // generateUnifiedSheetRelsXML produces xl/worksheets/_rels/sheetN.xml.rels
 // containing relationships for both tables and the drawing (when present).
 // rIds are assigned sequentially: tables first, then drawing.
-func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture) string {
+// sheetIndex is the 0-based sheet index used to name the drawing part.
+func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture, sheetIndex int) string {
 	if len(tables) == 0 && len(pictures) == 0 {
 		return ""
 	}
@@ -691,10 +694,7 @@ func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture) string {
 		rid++
 	}
 	if len(pictures) > 0 {
-		// A sheet has at most one drawing part. The name is fixed because
-		// pictures are only ever produced for the first worksheet; see
-		// SaveWorkbook's per-sheet drawing numbering.
-		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>`+"\n", rid)
+		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing%d.xml"/>`+"\n", rid, sheetIndex+1)
 	}
 
 	b.WriteString(`</Relationships>` + "\n")
@@ -712,12 +712,11 @@ func drawingRID(tables []*Table) string {
 // and media parts.
 func generateContentTypesForDrawings(worksheets []*Worksheet) string {
 	var b strings.Builder
-	hasDrawing := false
 	hasPng := false
 	hasJpeg := false
-	for _, ws := range worksheets {
+	for i, ws := range worksheets {
 		if len(ws.Pictures) > 0 {
-			hasDrawing = true
+			fmt.Fprintf(&b, `  <Override PartName="/xl/drawings/drawing%d.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>`+"\n", i+1)
 		}
 		for _, pic := range ws.Pictures {
 			if pic.Format == "png" {
@@ -726,9 +725,6 @@ func generateContentTypesForDrawings(worksheets []*Worksheet) string {
 				hasJpeg = true
 			}
 		}
-	}
-	if hasDrawing {
-		b.WriteString(`  <Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>` + "\n")
 	}
 	if hasPng {
 		b.WriteString(`  <Default Extension="png" ContentType="image/png"/>` + "\n")

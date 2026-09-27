@@ -1,6 +1,9 @@
 package cells_foss
 
-import "fmt"
+import (
+	"crypto/subtle"
+	"fmt"
+)
 
 // Workbook is the top-level object representing an Excel workbook.
 // It owns the collection of worksheets and caches the original source XML
@@ -38,6 +41,11 @@ type Workbook struct {
 // SetPassword configures an open password for the workbook.  Subsequent
 // calls to Save will produce an encrypted .xlsx file that requires this
 // password to open.  Pass an empty string to remove password protection.
+//
+// Deprecated: The encrypted output uses a custom ECRX container format
+// that only this library can read; Microsoft Excel cannot open it.
+// The key derivation is standard ECMA-376 Agile Encryption, but the
+// wrapping format is non-standard.
 func (wb *Workbook) SetPassword(password string) error {
 	if wb == nil {
 		return fmt.Errorf("cells_foss: workbook is nil")
@@ -51,11 +59,25 @@ func (wb *Workbook) SetPassword(password string) error {
 // encrypt this workbook (as set by SetPassword, or read from an encrypted
 // file).  When the workbook was not loaded from an encrypted file and
 // SetPassword has not been called, VerifyPassword returns true for any input.
+//
+// Deprecated: Returns true for any input when no password is set, and uses
+// non-constant-time comparison. Use CheckPassword instead.
 func (wb *Workbook) VerifyPassword(pw string) bool {
 	if wb.password == "" {
 		return true // no password set
 	}
 	return wb.password == pw
+}
+
+// CheckPassword returns true if the workbook is password-protected and the
+// provided password matches. It returns false if no password is set, or if
+// the password does not match. Uses constant-time comparison to prevent
+// timing attacks.
+func (wb *Workbook) CheckPassword(pw string) bool {
+	if wb.password == "" {
+		return false // no password set — not protected
+	}
+	return subtle.ConstantTimeCompare([]byte(wb.password), []byte(pw)) == 1
 }
 
 // registerStyle adds style to the workbook's style registry (deduplicating

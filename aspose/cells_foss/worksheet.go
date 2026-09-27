@@ -19,6 +19,11 @@ type Worksheet struct {
 
 	// Pictures holds the images embedded on this worksheet.
 	Pictures []*Picture
+
+	// sourceXML caches the raw XML bytes of this worksheet as read from the
+	// .xlsx file. When the workbook has not been modified this payload is
+	// written back verbatim to preserve round-trip fidelity.
+	sourceXML []byte
 }
 
 // Cells returns the Cells collection for this worksheet, enabling cell-level

@@ -1,6 +1,7 @@
 package cells_foss_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -418,5 +419,201 @@ func TestIntegration_EncryptDecryptFlow(t *testing.T) {
 	ca2, _ := reloaded.Worksheets[0].Cells().Get("A2")
 	if ca2.Value != "new data" {
 		t.Error("A2 lost")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cell typed accessors
+// ---------------------------------------------------------------------------
+
+func TestCell_AsFloat64(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	c.Set("A1", float64(42))
+	c.Set("A2", "3.14")
+	c.Set("A3", true)
+	c.Set("A4", "not a number")
+	c.Set("A5", int(99))
+
+	cell, _ := c.Get("A1")
+	if v, ok := cell.AsFloat64(); !ok || v != 42 {
+		t.Errorf("AsFloat64(float64) = %v, %v", v, ok)
+	}
+
+	cell, _ = c.Get("A2")
+	if v, ok := cell.AsFloat64(); !ok || v != 3.14 {
+		t.Errorf("AsFloat64(string-num) = %v, %v", v, ok)
+	}
+
+	cell, _ = c.Get("A3")
+	if v, ok := cell.AsFloat64(); !ok || v != 1 {
+		t.Errorf("AsFloat64(true) = %v, %v", v, ok)
+	}
+
+	cell, _ = c.Get("A4")
+	if _, ok := cell.AsFloat64(); ok {
+		t.Error("AsFloat64(non-numeric) should return false")
+	}
+
+	cell, _ = c.Get("A5")
+	if v, ok := cell.AsFloat64(); !ok || v != 99 {
+		t.Errorf("AsFloat64(int) = %v, %v", v, ok)
+	}
+}
+
+func TestCell_AsInt(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	c.Set("A1", float64(42.9))
+	c.Set("A2", "100")
+
+	cell, _ := c.Get("A1")
+	if v, ok := cell.AsInt(); !ok || v != 42 {
+		t.Errorf("AsInt(42.9) = %v, %v", v, ok)
+	}
+
+	cell, _ = c.Get("A2")
+	if v, ok := cell.AsInt(); !ok || v != 100 {
+		t.Errorf("AsInt(string) = %v, %v", v, ok)
+	}
+}
+
+func TestCell_AsString(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	c.Set("A1", float64(1.5))
+	c.Set("A2", true)
+	c.Set("A3", "hello")
+
+	cell, _ := c.Get("A1")
+	if s := cell.AsString(); s != "1.5" {
+		t.Errorf("AsString(1.5) = %q", s)
+	}
+
+	cell, _ = c.Get("A2")
+	if s := cell.AsString(); s != "TRUE" {
+		t.Errorf("AsString(true) = %q", s)
+	}
+
+	cell, _ = c.Get("A3")
+	if s := cell.AsString(); s != "hello" {
+		t.Errorf("AsString(hello) = %q", s)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Numeric cell round-trip (was broken: loaded as string, saved as shared string)
+// ---------------------------------------------------------------------------
+
+func TestNumericRoundTrip_PreservedAsNumber(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	c.Set("A1", float64(42))
+	c.Set("B1", float64(3.14))
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, "nums.xlsx")
+	wb.Save(p)
+
+	loaded, _ := cells_foss.LoadWorkbook(p)
+	lc := loaded.Worksheets[0].Cells()
+
+	ca1, _ := lc.Get("A1")
+	if _, ok := ca1.Value.(float64); !ok {
+		t.Errorf("A1 type = %T, want float64", ca1.Value)
+	}
+	if v, ok := ca1.AsFloat64(); !ok || v != 42 {
+		t.Errorf("A1 = %v", ca1.Value)
+	}
+
+	cb1, _ := lc.Get("B1")
+	if _, ok := cb1.Value.(float64); !ok {
+		t.Errorf("B1 type = %T, want float64", cb1.Value)
+	}
+
+	// Verify the saved XML does not use shared strings for numeric cells.
+	sheetXML, err := cells_foss.ReadTestZipEntry(p, "xl/worksheets/sheet1.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(sheetXML, []byte(`t="s"`)) {
+		t.Error("numeric cells should not use shared strings")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckPassword
+// ---------------------------------------------------------------------------
+
+func TestCheckPassword(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+
+	// No password set — CheckPassword should return false.
+	if wb.CheckPassword("anything") {
+		t.Error("CheckPassword should return false when no password is set")
+	}
+
+	// Old behavior: VerifyPassword returns true for any input when no password.
+	if !wb.VerifyPassword("anything") {
+		t.Error("VerifyPassword should return true when no password (backward compat)")
+	}
+
+	// Set password.
+	wb.SetPassword("secret")
+	if !wb.CheckPassword("secret") {
+		t.Error("CheckPassword should return true for correct password")
+	}
+	if wb.CheckPassword("wrong") {
+		t.Error("CheckPassword should return false for wrong password")
+	}
+
+	// VerifyPassword still works (deprecated but functional).
+	if !wb.VerifyPassword("secret") {
+		t.Error("VerifyPassword should still work")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Multi-sheet source XML caching
+// ---------------------------------------------------------------------------
+
+func TestMultiSheet_SourceXMLPreserved(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create a CSV file for the second sheet.
+	csvPath := filepath.Join(dir, "s2.csv")
+	os.WriteFile(csvPath, []byte("H1,H2\nv1,v2\n"), 0644)
+
+	wb := cells_foss.NewWorkbook()
+	wb.Worksheets[0].Cells().Set("A1", "Sheet1Data")
+	if err := wb.ImportFromCSV(csvPath, "Sheet2", ','); err != nil {
+		t.Fatal(err)
+	}
+
+	p := filepath.Join(dir, "multi.xlsx")
+	wb.Save(p)
+
+	loaded, err := cells_foss.LoadWorkbook(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Worksheets) != 2 {
+		t.Fatalf("got %d sheets, want 2", len(loaded.Worksheets))
+	}
+
+	// Unmodified save: both sheets should reuse their cached source XML.
+	p2 := filepath.Join(dir, "multi2.xlsx")
+	loaded.Save(p2)
+
+	sheet1Orig, _ := cells_foss.ReadTestZipEntry(p, "xl/worksheets/sheet1.xml")
+	sheet1Saved, _ := cells_foss.ReadTestZipEntry(p2, "xl/worksheets/sheet1.xml")
+	if !bytes.Equal(sheet1Orig, sheet1Saved) {
+		t.Error("unmodified sheet1 should be byte-identical after save")
+	}
+
+	sheet2Orig, _ := cells_foss.ReadTestZipEntry(p, "xl/worksheets/sheet2.xml")
+	sheet2Saved, _ := cells_foss.ReadTestZipEntry(p2, "xl/worksheets/sheet2.xml")
+	if !bytes.Equal(sheet2Orig, sheet2Saved) {
+		t.Error("unmodified sheet2 should be byte-identical after save")
 	}
 }

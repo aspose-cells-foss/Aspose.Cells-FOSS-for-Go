@@ -134,11 +134,17 @@ func SaveWorkbook(wb *Workbook, path string) error {
 	ssTable, ssIndex := buildSharedStrings(wb.Worksheets)
 
 	// ---- Sheet XML + tables ----
+	// Global picture counter for unique media part names across all sheets.
+	globalPicIdx := 0
 	for i, ws := range wb.Worksheets {
 		sheetPath := fmt.Sprintf("xl/worksheets/sheet%d.xml", i+1)
 
 		var sheetContent string
-		if !wb.Modified && wb.SourceXML != nil && i == 0 {
+		if !wb.Modified && ws.sourceXML != nil {
+			sheetContent = string(ws.sourceXML)
+		} else if !wb.Modified && wb.SourceXML != nil && i == 0 {
+			// Backward compatibility: older workbooks may only have
+			// Workbook.SourceXML set (from before per-sheet caching).
 			sheetContent = string(wb.SourceXML)
 		} else {
 			sheetContent = generateSheetXML(ws, ssIndex)
@@ -160,7 +166,7 @@ func SaveWorkbook(wb *Workbook, path string) error {
 		}
 
 		// ---- Sheet rels (unified: tables + drawing) ----
-		unifiedRels := generateUnifiedSheetRelsXML(ws.Tables, ws.Pictures)
+		unifiedRels := generateUnifiedSheetRelsXML(ws.Tables, ws.Pictures, i)
 		if unifiedRels != "" {
 			relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", i+1)
 			if err := writeZipString(zw, relsPath, unifiedRels); err != nil {
@@ -172,25 +178,26 @@ func SaveWorkbook(wb *Workbook, path string) error {
 		// ---- Drawing XML + drawing rels + media ----
 		if len(ws.Pictures) > 0 {
 			drawingPath := fmt.Sprintf("xl/drawings/drawing%d.xml", i+1)
-			drawingXML := generateDrawingXML(ws.Pictures, 0)
+			drawingXML := generateDrawingXML(ws.Pictures, globalPicIdx)
 			if err := writeZipString(zw, drawingPath, drawingXML); err != nil {
 				zw.Close()
 				return fmt.Errorf("saving workbook: drawing: %w", err)
 			}
 
 			drRelsPath := fmt.Sprintf("xl/drawings/_rels/drawing%d.xml.rels", i+1)
-			drRelsXML := generateDrawingRelsXML(ws.Pictures)
+			drRelsXML := generateDrawingRelsXML(ws.Pictures, globalPicIdx)
 			if err := writeZipString(zw, drRelsPath, drRelsXML); err != nil {
 				zw.Close()
 				return fmt.Errorf("saving workbook: drawing rels: %w", err)
 			}
 
-			for pi, pic := range ws.Pictures {
+			for _, pic := range ws.Pictures {
 				ext := pic.Format
 				if ext == "jpeg" {
 					ext = "jpg"
 				}
-				mediaPath := fmt.Sprintf("xl/media/image%d.%s", pi+1, ext)
+				globalPicIdx++
+				mediaPath := fmt.Sprintf("xl/media/image%d.%s", globalPicIdx, ext)
 				fw, err := zw.Create(mediaPath)
 				if err != nil {
 					zw.Close()
@@ -239,6 +246,9 @@ func SaveWorkbook(wb *Workbook, path string) error {
 	// SourceXML cache is invalidated so the next Save regenerates.
 	wb.Modified = false
 	wb.SourceXML = nil
+	for _, ws := range wb.Worksheets {
+		ws.sourceXML = nil
+	}
 	wb.FilePath = path
 
 	return nil
