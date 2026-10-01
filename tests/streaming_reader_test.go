@@ -141,3 +141,100 @@ func TestStreamingReader_Boolean(t *testing.T) {
 		t.Errorf("bool: %v", rows[0])
 	}
 }
+
+func TestStreamingReader_RowRange(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	for r := 1; r <= 20; r++ {
+		c.Set(fmt.Sprintf("A%d", r), r*10)
+		c.Set(fmt.Sprintf("B%d", r), fmt.Sprintf("Row%d", r))
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "range.xlsx")
+	wb.Save(p)
+
+	sr := cells_foss.NewStreamingReader(p)
+	var rows []int
+	err := sr.ProcessRowsWithRange("", 5, 10, func(rowIdx int, _ map[string]string) error {
+		rows = append(rows, rowIdx)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ProcessRowsWithRange: %v", err)
+	}
+	if len(rows) != 6 {
+		t.Errorf("got %d rows, want 6 (rows 5-10)", len(rows))
+	}
+	if rows[0] != 5 || rows[len(rows)-1] != 10 {
+		t.Errorf("rows = %v, want [5..10]", rows)
+	}
+}
+
+func TestStreamingReader_ColumnFilter(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	c.Set("A1", "ColA")
+	c.Set("B1", "ColB")
+	c.Set("C1", "ColC")
+	c.Set("D1", "ColD")
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cols.xlsx")
+	wb.Save(p)
+
+	sr := cells_foss.NewStreamingReader(p)
+	var cells map[string]string
+	err := sr.ProcessRowsWithColumns("", []string{"A", "C"}, func(_ int, c map[string]string) error {
+		cells = c
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ProcessRowsWithColumns: %v", err)
+	}
+	if len(cells) != 2 {
+		t.Errorf("got %d cells, want 2", len(cells))
+	}
+	if cells["A1"] != "ColA" || cells["C1"] != "ColC" {
+		t.Errorf("cells = %v, want A1=ColA, C1=ColC", cells)
+	}
+	if _, ok := cells["B1"]; ok {
+		t.Error("B1 should be filtered out")
+	}
+}
+
+func TestStreamingReader_CombinedFilter(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	c := wb.Worksheets[0].Cells()
+	for r := 1; r <= 10; r++ {
+		c.Set(fmt.Sprintf("A%d", r), r)
+		c.Set(fmt.Sprintf("B%d", r), r*10)
+		c.Set(fmt.Sprintf("C%d", r), r*100)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "combined.xlsx")
+	wb.Save(p)
+
+	sr := cells_foss.NewStreamingReader(p)
+	opts := &cells_foss.StreamOptions{
+		StartRow: 3,
+		EndRow:   7,
+		Columns:  []string{"A", "C"},
+	}
+	var rows []map[string]string
+	err := sr.ProcessRowsWithFilter("", opts, func(_ int, c map[string]string) error {
+		rows = append(rows, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ProcessRowsWithFilter: %v", err)
+	}
+	if len(rows) != 5 {
+		t.Errorf("got %d rows, want 5 (rows 3-7)", len(rows))
+	}
+	// Check first row (row 3)
+	if len(rows[0]) != 2 {
+		t.Errorf("first row has %d cells, want 2", len(rows[0]))
+	}
+	if rows[0]["A3"] != "3" || rows[0]["C3"] != "300" {
+		t.Errorf("first row = %v, want A3=3, C3=300", rows[0])
+	}
+}

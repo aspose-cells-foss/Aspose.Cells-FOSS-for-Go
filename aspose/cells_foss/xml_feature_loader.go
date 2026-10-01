@@ -289,3 +289,225 @@ func loadTables(zr *zip.Reader, sheetIndex int) ([]*Table, error) {
 	}
 	return tables, nil
 }
+
+// ======================================================================
+// Internal XML types for decoding drawing XML
+// ======================================================================
+
+type xmlDrawingWS struct {
+	XMLName  xml.Name    `xml:"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing wsDr"`
+	Anchors  []xmlAnchor `xml:"twoCellAnchor"`
+	Anchors2 []xmlAnchor `xml:"oneCellAnchor"`
+}
+
+type xmlAnchor struct {
+	From xmlPos `xml:"from"`
+	To   xmlPos `xml:"to"`
+	Pic  xmlPic `xml:"pic"`
+}
+
+type xmlPos struct {
+	Col    int   `xml:"col"`
+	ColOff int64 `xml:"colOff"`
+	Row    int   `xml:"row"`
+	RowOff int64 `xml:"rowOff"`
+}
+
+type xmlPic struct {
+	NvPicPr  xmlNvPicPr  `xml:"nvPicPr"`
+	BlipFill xmlBlipFill `xml:"blipFill"`
+	SpPr     xmlSpPr     `xml:"spPr"`
+}
+
+type xmlNvPicPr struct {
+	CNvPr xmlCNvPr `xml:"cNvPr"`
+}
+
+type xmlCNvPr struct {
+	ID   int    `xml:"id,attr"`
+	Name string `xml:"name,attr"`
+}
+
+type xmlBlipFill struct {
+	Blip xmlBlip `xml:"http://schemas.openxmlformats.org/drawingml/2006/main blip"`
+}
+
+type xmlBlip struct {
+	Embed string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships embed,attr"`
+}
+
+type xmlSpPr struct {
+	Xfrm xmlXfrm `xml:"http://schemas.openxmlformats.org/drawingml/2006/main xfrm"`
+}
+
+type xmlXfrm struct {
+	Off xmlPoint `xml:"off"`
+	Ext xmlPoint `xml:"ext"`
+}
+
+type xmlPoint struct {
+	X int64 `xml:"x,attr"`
+	Y int64 `xml:"y,attr"`
+}
+
+// loadDrawings reads the drawing XML and relationships for the given sheet
+// index, then loads the referenced images from xl/media/.
+func loadDrawings(zr *zip.Reader, sheetIndex int) ([]*Picture, error) {
+	// 1. Find the drawing relationship in sheet rels.
+	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
+	relsRaw, err := readZipFile(zr, relsPath)
+	if err != nil {
+		return nil, nil // No rels means no drawings
+	}
+
+	var rels xmlRelationships
+	if err := xml.Unmarshal(relsRaw, &rels); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", relsPath, err)
+	}
+
+	// Find the drawing relationship.
+	var drawingRID, drawingTarget string
+	for _, rel := range rels.Rels {
+		if strings.Contains(rel.Target, "drawings/") {
+			drawingRID = rel.ID
+			drawingTarget = rel.Target
+			break
+		}
+	}
+	if drawingRID == "" {
+		return nil, nil // No drawing relationship
+	}
+
+	// 2. Parse the drawing XML.
+	drawingPath := path.Clean(path.Join("xl/worksheets", drawingTarget))
+	drawingRaw, err := readZipFile(zr, drawingPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", drawingPath, err)
+	}
+
+	var drawing xmlDrawingWS
+	if err := xml.Unmarshal(drawingRaw, &drawing); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", drawingPath, err)
+	}
+
+	// 3. Parse drawing relationships to map rId to media paths.
+	drawingRelsPath := path.Clean(path.Join(path.Dir(drawingPath), "_rels", path.Base(drawingPath)+".rels"))
+	drawingRelsRaw, err := readZipFile(zr, drawingRelsPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %w", drawingRelsPath, err)
+	}
+
+	var drawingRels xmlRelationships
+	if err := xml.Unmarshal(drawingRelsRaw, &drawingRels); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", drawingRelsPath, err)
+	}
+
+	mediaPathByRID := make(map[string]string)
+	for _, rel := range drawingRels.Rels {
+		if strings.Contains(rel.Target, "media/") {
+			mediaPath := path.Clean(path.Join(path.Dir(drawingPath), rel.Target))
+			mediaPathByRID[rel.ID] = mediaPath
+		}
+	}
+
+	// 4. Load each picture.
+	var pictures []*Picture
+	anchors := append(drawing.Anchors, drawing.Anchors2...)
+	for _, anchor := range anchors {
+		// Get the image relationship ID.
+		embedRID := anchor.Pic.BlipFill.Blip.Embed
+		if embedRID == "" {
+			continue
+		}
+
+		// Get the media path.
+		mediaPath, ok := mediaPathByRID[embedRID]
+		if !ok {
+			continue
+		}
+
+		// Load the image data.
+		imageData, err := readZipFile(zr, mediaPath)
+		if err != nil {
+			continue
+		}
+
+		// Determine format from extension.
+		format := "png"
+		if strings.HasSuffix(strings.ToLower(mediaPath), ".jpg") || strings.HasSuffix(strings.ToLower(mediaPath), ".jpeg") {
+			format = "jpeg"
+		}
+
+		// Calculate width/height from EMUs.
+		width := int(anchor.Pic.SpPr.Xfrm.Ext.X / emuPerPixel)
+		height := int(anchor.Pic.SpPr.Xfrm.Ext.Y / emuPerPixel)
+
+		pic := &Picture{
+			Data:   imageData,
+			Format: format,
+			Row:    anchor.From.Row,
+			Col:    anchor.From.Col,
+			RowOff: anchor.From.RowOff,
+			ColOff: anchor.From.ColOff,
+			Width:  width,
+			Height: height,
+			Name:   anchor.Pic.NvPicPr.CNvPr.Name,
+		}
+		pictures = append(pictures, pic)
+	}
+
+	return pictures, nil
+}
+
+// ======================================================================
+// Internal XML types for decoding conditional formatting
+// ======================================================================
+
+type xmlConditionalFormatting struct {
+	Ref   string      `xml:"ref,attr"`
+	Rules []xmlCFRule `xml:"cfRule"`
+}
+
+type xmlCFRule struct {
+	Type       string `xml:"type,attr"`
+	Operator   string `xml:"operator,attr,omitempty"`
+	Priority   int    `xml:"priority,attr"`
+	Formula    string `xml:"formula,omitempty"`
+	Formula2   string `xml:"formula2,omitempty"`
+	Text       string `xml:"text,attr,omitempty"`
+	StopIfTrue int    `xml:"stopIfTrue,attr,omitempty"`
+	DxfID      int    `xml:"dxfId,attr,omitempty"`
+}
+
+// loadConditionalFormattings reads the conditional formatting rules for the
+// given sheet from the worksheet XML.
+func loadConditionalFormattings(ws *Worksheet, rawXML []byte) error {
+	// Parse the worksheet XML to extract conditional formatting.
+	var sheet struct {
+		ConditionalFormattings []xmlConditionalFormatting `xml:"conditionalFormatting"`
+	}
+	if err := xml.Unmarshal(rawXML, &sheet); err != nil {
+		return nil // Not an error; sheet may not have conditional formatting
+	}
+
+	for _, xcf := range sheet.ConditionalFormattings {
+		cf := &ConditionalFormatting{
+			Ref: xcf.Ref,
+		}
+		for _, xrule := range xcf.Rules {
+			rule := &ConditionalFormattingRule{
+				Type:       xrule.Type,
+				Operator:   xrule.Operator,
+				Priority:   xrule.Priority,
+				Formula:    xrule.Formula,
+				Formula2:   xrule.Formula2,
+				Text:       xrule.Text,
+				StopIfTrue: xrule.StopIfTrue != 0,
+				StyleID:    xrule.DxfID,
+			}
+			cf.Rules = append(cf.Rules, rule)
+		}
+		ws.ConditionalFormattings = append(ws.ConditionalFormattings, cf)
+	}
+	return nil
+}

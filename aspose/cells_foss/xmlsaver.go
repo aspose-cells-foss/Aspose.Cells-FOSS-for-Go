@@ -32,11 +32,12 @@ type outSheet struct {
 }
 
 type outWorksheet struct {
-	XMLName         xml.Name            `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main worksheet"`
-	SheetData       outSheetData        `xml:"sheetData"`
-	DataValidations *outDataValidations `xml:"dataValidations,omitempty"`
-	TableParts      *outTableParts      `xml:"tableParts,omitempty"`
-	Drawing         *outDrawingRef      `xml:"drawing,omitempty"`
+	XMLName               xml.Name                   `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main worksheet"`
+	SheetData             outSheetData               `xml:"sheetData"`
+	ConditionalFormatting []outConditionalFormatting `xml:"conditionalFormatting,omitempty"`
+	DataValidations       *outDataValidations        `xml:"dataValidations,omitempty"`
+	TableParts            *outTableParts             `xml:"tableParts,omitempty"`
+	Drawing               *outDrawingRef             `xml:"drawing,omitempty"`
 }
 
 type outDrawingRef struct {
@@ -229,11 +230,15 @@ func SaveWorkbook(wb *Workbook, path string) error {
 
 	var outData []byte
 	if wb.password != "" {
-		infoXML, encPkg, err := encryptPackage(zipBytes, wb.password)
+		infoXML, encPkg, origSize, err := encryptPackage(zipBytes, wb.password)
 		if err != nil {
 			return fmt.Errorf("saving workbook: encryption: %w", err)
 		}
-		outData = writeEncryptedFile(infoXML, encPkg)
+		// Wrap in OLE/CFB container so Excel can open it.
+		outData, err = writeEncryptedCFB(infoXML, encPkg, origSize)
+		if err != nil {
+			return fmt.Errorf("saving workbook: CFB wrap: %w", err)
+		}
 	} else {
 		outData = zipBytes
 	}
@@ -368,9 +373,10 @@ func generateSheetXML(ws *Worksheet, ssIndex map[string]int) string {
 	}
 
 	wsOut := outWorksheet{
-		SheetData:       outSheetData{Rows: outRows},
-		DataValidations: buildDataValidations(ws.DataValidations),
-		TableParts:      buildTableParts(ws.Tables),
+		SheetData:             outSheetData{Rows: outRows},
+		ConditionalFormatting: buildConditionalFormattings(ws.ConditionalFormattings),
+		DataValidations:       buildDataValidations(ws.DataValidations),
+		TableParts:            buildTableParts(ws.Tables),
 	}
 	if len(ws.Pictures) > 0 {
 		wsOut.Drawing = &outDrawingRef{RID: drawingRID(ws.Tables)}

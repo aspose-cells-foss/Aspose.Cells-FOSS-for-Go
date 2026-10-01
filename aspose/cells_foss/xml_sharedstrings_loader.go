@@ -36,13 +36,13 @@ type xmlRun struct {
 // ---------------------------------------------------------------------------
 
 // loadSharedStrings reads xl/sharedStrings.xml from the ZIP archive and
-// returns a map from 0-based index to the resolved string value.
-// It returns an empty map (and no error) when the file is absent, which is
+// returns a slice of strings indexed by their 0-based position.
+// It returns an empty slice (and no error) when the file is absent, which is
 // valid for workbooks that use inline values only.
-func loadSharedStrings(zr *zip.Reader) (map[int]string, error) {
+func loadSharedStrings(zr *zip.Reader) ([]string, error) {
 	raw, err := readZipFile(zr, "xl/sharedStrings.xml")
 	if err != nil {
-		return map[int]string{}, nil
+		return []string{}, nil
 	}
 
 	var sst xmlSST
@@ -50,7 +50,7 @@ func loadSharedStrings(zr *zip.Reader) (map[int]string, error) {
 		return nil, fmt.Errorf("shared strings: %w", err)
 	}
 
-	out := make(map[int]string, len(sst.Items))
+	out := make([]string, len(sst.Items))
 	for i, si := range sst.Items {
 		out[i] = resolveSIText(si)
 	}

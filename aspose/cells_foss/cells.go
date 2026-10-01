@@ -1,7 +1,5 @@
 package cells_foss
 
-import "fmt"
-
 // Cells is a collection of Cell values indexed by A1-style string references
 // (e.g. "A1", "B2", "Z100"). It is the primary API for reading and writing
 // cell data within a worksheet.
@@ -33,11 +31,11 @@ func (c *Cells) setWorksheet(ws *Worksheet) {
 // no cell exists at that reference.
 func (c *Cells) Get(ref string) (*Cell, error) {
 	if c.cells == nil {
-		return nil, fmt.Errorf("cells: cell %q not found", ref)
+		return nil, &CellNotFoundError{Ref: ref}
 	}
 	cell, ok := c.cells[ref]
 	if !ok {
-		return nil, fmt.Errorf("cells: cell %q not found", ref)
+		return nil, &CellNotFoundError{Ref: ref}
 	}
 	return cell, nil
 }
@@ -72,10 +70,10 @@ func (c *Cells) Set(ref string, value interface{}) error {
 // A successful removal marks the owning Workbook as modified.
 func (c *Cells) Remove(ref string) error {
 	if c.cells == nil {
-		return fmt.Errorf("cells: cell %q not found", ref)
+		return &CellNotFoundError{Ref: ref}
 	}
 	if _, ok := c.cells[ref]; !ok {
-		return fmt.Errorf("cells: cell %q not found", ref)
+		return &CellNotFoundError{Ref: ref}
 	}
 	delete(c.cells, ref)
 	if c.wb != nil {

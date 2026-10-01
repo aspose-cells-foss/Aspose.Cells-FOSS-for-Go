@@ -10,7 +10,7 @@ You are a senior Go engineer working on a pure-Go Excel library. Prioritize Exce
 - Preserve loaded workbook content when it was not modified, especially XML parts cached on objects such as `sourceXML`
 - Add new workbook features through the existing loader/saver split: `xml_feature_loader.go` and `xml_feature_saver.go`
 - Keep worksheet XML in ECMA-376-compatible element order when adding new nodes
-- Use `SaveFormat` or file extensions consistently when saving workbooks
+- Use file extensions consistently when saving workbooks
 - Add or update example coverage when changing user-facing behavior in `aspose/cells_foss/`
 - Prefer stdlib packages already used by the repo (`encoding/xml`, `archive/zip`) over new dependencies
 - Run targeted tests for the area you changed before finishing
@@ -82,16 +82,22 @@ aspose/cells_foss/              # Library source code (canonical location)
   cell.go / cells.go            # Cell model and A1-keyed collection
   style.go                      # Font, fill, border, alignment, number format
   picture.go                    # Drawing objects
+  chart.go                      # Chart support (bar, line, pie)
   table.go                      # Excel table support
+  pivot_table.go                # Pivot table support
   datavalidation.go             # Validation models and enums
+  conditional_format.go         # Conditional formatting rules
+  macro.go                      # VBA project storage (read/write binary data)
+  errors.go                     # Custom error types
   csv_handler.go                # CSV import/export
-  formula_engine.go             # SUM/AVERAGE/MAX/MIN evaluation
-  streaming_reader.go           # Row-by-row reader for large files
+  formula_engine.go             # SUM/AVERAGE/MAX/MIN/IF/COUNTIF/VLOOKUP evaluation
+  streaming_reader.go           # Row-by-row reader for large files with filtering
   crypto.go                     # Encrypted workbooks (Agile Encryption)
+  olecfb.go                     # OLE/CFB container for Excel-compatible encryption
   xmlloader.go                  # Workbook/sheet/rels XML loading
   xmlsaver.go                   # Workbook and sheet XML saving
-  xml_feature_loader.go         # styles.xml and table XML loading
-  xml_feature_saver.go          # styles.xml, tables, drawings, validations
+  xml_feature_loader.go         # styles.xml, table, drawing, conditional formatting loading
+  xml_feature_saver.go          # styles.xml, tables, drawings, validations, conditional formatting, charts
   xml_sharedstrings_loader.go   # sharedStrings.xml loading
   test_helpers.go               # Helpers exported for tests/ (not stable API)
 examples/                       # Executable usage coverage (separate module, main packages)
@@ -120,7 +126,7 @@ ws.Cells().Set("A1", "Revenue")
 ws.Cells().Set("B2", 42)
 
 cell, err := ws.Cells().Get("A1")   // errors when the cell does not exist
-fmt.Println(cell.Value)
+fmt.Println(cell.AsString())         // type-safe accessor (cell.Value is deprecated)
 ```
 
 ### Bad cell access
@@ -168,11 +174,10 @@ func main() {
 Do not assume these already work; they are documented so that decisions are not
 made from misleading descriptions.
 
-- **Encrypted files are not Excel-readable.** `Workbook.SetPassword` wraps the
-  package in a custom `ECRX`-magic container (`aspose/cells_foss/crypto.go`),
-  not the OLE/CFB container Excel uses. Only this library can read the result.
-  The key derivation itself is standard ECMA-376 Agile Encryption.
-  `SetPassword` is deprecated for this reason.
+- **Encrypted files use OLE/CFB container.** `Workbook.SetPassword` produces
+  standard OLE/CFB containers with ECMA-376 Agile Encryption, compatible with
+  Microsoft Excel. The implementation is in `aspose/cells_foss/olecfb.go`.
+  Legacy `ECRX`-format files (from earlier versions) can still be loaded.
 - **Passwords are held in plaintext.** The old `VerifyPassword` returns `true`
   for any input when no password is set and uses non-constant-time comparison.
   Use `CheckPassword` instead — it returns `false` when no password is set and
@@ -181,12 +186,21 @@ made from misleading descriptions.
   (not `string`), so direct type assertions like `cell.Value.(string)` may
   panic. Use `Cell.AsFloat64()`, `Cell.AsInt()`, or `Cell.AsString()` for
   type-safe access. `Cell.Value` is deprecated in favor of these methods.
-- **The `Modified` flag is workbook-level.** Modifying any sheet marks the
-  entire workbook as modified, causing all sheets to be regenerated on save.
-  Per-sheet source XML caching (`Worksheet.sourceXML`) enables byte-identical
-  round-trip only when no sheet is modified.
-- **Pictures are write-only.** There is no drawing/picture loading. Multi-sheet
-  workbooks with pictures use correct per-sheet drawing and media part names.
+- **Per-sheet `Modified` tracking.** Each `Worksheet` has a `Modified` bool
+  field set to true when its content changes. The saver uses this to decide
+  whether to regenerate a sheet's XML or reuse its cached `sourceXML`. The
+  workbook-level `Workbook.Modified` flag is also maintained for backward
+  compatibility. Unmodified sheets preserve byte-identical round-trip even
+  when other sheets are modified.
+- **Pictures support read/write.** Pictures can be loaded from existing .xlsx
+  files and saved to new files. The implementation parses drawing XML and
+  relationships to reconstruct `Picture` objects with position, size, and
+  image data. Multi-sheet workbooks use correct per-sheet drawing and media
+  part names.
+- **VBA macro support is storage-only.** `Workbook.SetVBAProject` accepts raw
+  `vbaProject.bin` binary data and stores it for round-trip preservation. The
+  library cannot create, edit, or execute VBA code. Use .xlsm extension when
+  saving macro-enabled workbooks.
 - **`test_helpers.go` exports are deprecated.** `WriteTestXLSX`,
   `ReadTestZipEntry`, and `MinimalPNG` exist for `tests/`; they are not part of
   the supported API and are marked deprecated.

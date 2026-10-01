@@ -16,6 +16,11 @@ import (
 //   - AVERAGE(ref, …)
 //   - MAX(ref, …)
 //   - MIN(ref, …)
+//   - COUNT(ref, …)
+//   - CONCAT(ref, …)
+//   - IF(condition, true_val, false_val)
+//   - COUNTIF(range, criteria)
+//   - VLOOKUP(value, range, col_index, [match])
 //
 // References may be single cells ("A1"), ranges ("A1:A10" / "A1:C1"), or
 // comma-separated combinations of both.  Non-numeric cells are silently
@@ -45,7 +50,20 @@ func CalculateFormula(formula string, ws *Worksheet) (interface{}, error) {
 		return nil, fmt.Errorf("formula: %s requires at least one argument", funcName)
 	}
 
-	// Expand all references to concrete values.
+	// For functions that need raw arguments (CONCAT, IF, COUNTIF, VLOOKUP),
+	// pass args directly without pre-expanding to float64.
+	switch funcName {
+	case "CONCAT":
+		return concatFunc(args, ws)
+	case "IF":
+		return ifFunc(args, ws)
+	case "COUNTIF":
+		return countIfFunc(args, ws)
+	case "VLOOKUP":
+		return vlookupFunc(args, ws)
+	}
+
+	// For numeric aggregation functions, expand all references to float64 values.
 	var values []float64
 	for _, arg := range args {
 		arg = strings.TrimSpace(arg)
@@ -60,13 +78,14 @@ func CalculateFormula(formula string, ws *Worksheet) (interface{}, error) {
 			// Single cell reference.
 			v, err := resolveCellRef(arg, ws)
 			if err != nil {
-				return nil, fmt.Errorf("formula: %w", err)
+				// For numeric functions, skip non-numeric cells
+				continue
 			}
 			values = append(values, v)
 		}
 	}
 
-	// Apply the function.
+	// Apply the numeric function.
 	switch funcName {
 	case "SUM":
 		return sum(values), nil
@@ -85,6 +104,8 @@ func CalculateFormula(formula string, ws *Worksheet) (interface{}, error) {
 			return nil, fmt.Errorf("formula: MIN of empty range")
 		}
 		return min(values), nil
+	case "COUNT":
+		return float64(len(values)), nil
 	default:
 		return nil, fmt.Errorf("formula: unsupported function %q", funcName)
 	}
@@ -278,4 +299,416 @@ func splitFormulaArgs(s string) []string {
 	}
 	args = append(args, s[start:])
 	return args
+}
+
+// ---------------------------------------------------------------------------
+// CONCAT function
+// ---------------------------------------------------------------------------
+
+func concatFunc(args []string, ws *Worksheet) (interface{}, error) {
+	var result strings.Builder
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if strings.Contains(arg, ":") {
+			// Range reference - get all cells
+			cells, err := resolveRangeRaw(arg, ws)
+			if err != nil {
+				return nil, fmt.Errorf("formula: %w", err)
+			}
+			for _, cell := range cells {
+				result.WriteString(cellToString(cell.Value))
+			}
+		} else {
+			// Single cell reference
+			cell, err := ws.Cells().Get(arg)
+			if err != nil {
+				continue // skip missing cells
+			}
+			result.WriteString(cellToString(cell.Value))
+		}
+	}
+	return result.String(), nil
+}
+
+func cellToString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64, float32, int, int64:
+		return fmt.Sprintf("%v", val)
+	case bool:
+		if val {
+			return "TRUE"
+		}
+		return "FALSE"
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IF function
+// ---------------------------------------------------------------------------
+
+func ifFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("formula: IF requires 2 or 3 arguments")
+	}
+
+	condition := strings.TrimSpace(args[0])
+	trueVal := strings.TrimSpace(args[1])
+	falseVal := ""
+	if len(args) == 3 {
+		falseVal = strings.TrimSpace(args[2])
+	}
+
+	// Evaluate condition
+	condResult, err := evaluateCondition(condition, ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	if condResult {
+		return evaluateValue(trueVal, ws)
+	}
+	if falseVal != "" {
+		return evaluateValue(falseVal, ws)
+	}
+	return false, nil
+}
+
+// evaluateCondition evaluates a condition expression like "A1>10" or "TRUE"
+func evaluateCondition(expr string, ws *Worksheet) (bool, error) {
+	expr = strings.TrimSpace(expr)
+
+	// Check for comparison operators (order matters - check multi-char first)
+	operators := []string{">=", "<=", "<>", "!=", ">", "<", "="}
+	for _, op := range operators {
+		idx := strings.Index(expr, op)
+		if idx > 0 {
+			left := strings.TrimSpace(expr[:idx])
+			right := strings.TrimSpace(expr[idx+len(op):])
+
+			leftVal, err := evaluateValue(left, ws)
+			if err != nil {
+				return false, err
+			}
+			rightVal, err := evaluateValue(right, ws)
+			if err != nil {
+				return false, err
+			}
+
+			return compareValues(leftVal, rightVal, op)
+		}
+	}
+
+	// No operator - treat as boolean value
+	val, err := evaluateValue(expr, ws)
+	if err != nil {
+		return false, err
+	}
+
+	switch v := val.(type) {
+	case bool:
+		return v, nil
+	case float64:
+		return v != 0, nil
+	case string:
+		return strings.ToUpper(v) == "TRUE", nil
+	default:
+		return false, fmt.Errorf("cannot convert %v to boolean", val)
+	}
+}
+
+// evaluateValue evaluates a value expression (cell reference, number, or string)
+func evaluateValue(expr string, ws *Worksheet) (interface{}, error) {
+	expr = strings.TrimSpace(expr)
+
+	// Check if it's a quoted string
+	if len(expr) >= 2 && expr[0] == '"' && expr[len(expr)-1] == '"' {
+		return expr[1 : len(expr)-1], nil
+	}
+
+	// Check if it's a boolean literal
+	upper := strings.ToUpper(expr)
+	if upper == "TRUE" {
+		return true, nil
+	}
+	if upper == "FALSE" {
+		return false, nil
+	}
+
+	// Check if it's a number
+	if f, err := strconv.ParseFloat(expr, 64); err == nil {
+		return f, nil
+	}
+
+	// Must be a cell reference (only if ws is provided)
+	if ws == nil {
+		return expr, nil // return as string if no worksheet
+	}
+
+	cell, err := ws.Cells().Get(expr)
+	if err != nil {
+		return nil, fmt.Errorf("cell %s not found", expr)
+	}
+	return cell.Value, nil
+}
+
+// compareValues compares two values using the given operator
+func compareValues(left, right interface{}, op string) (bool, error) {
+	// Try numeric comparison first
+	leftNum, leftIsNum := toFloat64(left)
+	rightNum, rightIsNum := toFloat64(right)
+
+	if leftIsNum && rightIsNum {
+		switch op {
+		case ">":
+			return leftNum > rightNum, nil
+		case "<":
+			return leftNum < rightNum, nil
+		case ">=":
+			return leftNum >= rightNum, nil
+		case "<=":
+			return leftNum <= rightNum, nil
+		case "=", "==":
+			return leftNum == rightNum, nil
+		case "<>", "!=":
+			return leftNum != rightNum, nil
+		}
+	}
+
+	// String comparison
+	leftStr := fmt.Sprintf("%v", left)
+	rightStr := fmt.Sprintf("%v", right)
+
+	switch op {
+	case "=", "==":
+		return leftStr == rightStr, nil
+	case "<>", "!=":
+		return leftStr != rightStr, nil
+	case ">":
+		return leftStr > rightStr, nil
+	case "<":
+		return leftStr < rightStr, nil
+	case ">=":
+		return leftStr >= rightStr, nil
+	case "<=":
+		return leftStr <= rightStr, nil
+	}
+
+	return false, fmt.Errorf("unknown operator: %s", op)
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case float32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	case int64:
+		return float64(val), true
+	case string:
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			return f, true
+		}
+		return 0, false
+	case bool:
+		if val {
+			return 1, true
+		}
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+// ---------------------------------------------------------------------------
+// COUNTIF function
+// ---------------------------------------------------------------------------
+
+func countIfFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("formula: COUNTIF requires exactly 2 arguments")
+	}
+
+	rangeRef := strings.TrimSpace(args[0])
+	criteria := strings.TrimSpace(args[1])
+
+	// Strip quotes from criteria if present
+	if len(criteria) >= 2 && criteria[0] == '"' && criteria[len(criteria)-1] == '"' {
+		criteria = criteria[1 : len(criteria)-1]
+	}
+
+	// Get all cells in range
+	cells, err := resolveRangeRaw(rangeRef, ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	count := 0
+	for _, cell := range cells {
+		if matchesCriteria(cell.Value, criteria) {
+			count++
+		}
+	}
+
+	return float64(count), nil
+}
+
+// matchesCriteria checks if a value matches the given criteria
+func matchesCriteria(value interface{}, criteria string) bool {
+	// Check if criteria is a comparison expression
+	operators := []string{">=", "<=", "<>", "!=", "=", ">", "<"}
+	for _, op := range operators {
+		if strings.HasPrefix(criteria, op) {
+			criteriaVal := strings.TrimSpace(criteria[len(op):])
+			criteriaParsed, err := evaluateValue(criteriaVal, nil)
+			if err != nil {
+				return false
+			}
+			result, err := compareValues(value, criteriaParsed, op)
+			if err != nil {
+				return false
+			}
+			return result
+		}
+	}
+
+	// Exact match
+	criteriaParsed, err := evaluateValue(criteria, nil)
+	if err != nil {
+		return false
+	}
+
+	result, err := compareValues(value, criteriaParsed, "=")
+	if err != nil {
+		return false
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// VLOOKUP function
+// ---------------------------------------------------------------------------
+
+func vlookupFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) < 3 || len(args) > 4 {
+		return nil, fmt.Errorf("formula: VLOOKUP requires 3 or 4 arguments")
+	}
+
+	lookupValue := strings.TrimSpace(args[0])
+	rangeRef := strings.TrimSpace(args[1])
+	colIndexStr := strings.TrimSpace(args[2])
+
+	// Parse column index
+	colIndex, err := strconv.Atoi(colIndexStr)
+	if err != nil {
+		return nil, fmt.Errorf("formula: invalid column index: %s", colIndexStr)
+	}
+	if colIndex < 1 {
+		return nil, fmt.Errorf("formula: column index must be >= 1")
+	}
+
+	// Get lookup value
+	lookupVal, err := evaluateValue(lookupValue, ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	// Parse range
+	parts := strings.SplitN(rangeRef, ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("formula: invalid range: %s", rangeRef)
+	}
+
+	startRef := strings.TrimSpace(parts[0])
+	endRef := strings.TrimSpace(parts[1])
+
+	startCol, startRow := splitRef(startRef)
+	endCol, endRow := splitRef(endRef)
+
+	startColNum := colToNum(startCol)
+	endColNum := colToNum(endCol)
+
+	if startColNum > endColNum {
+		startColNum, endColNum = endColNum, startColNum
+	}
+	if startRow > endRow {
+		startRow, endRow = endRow, startRow
+	}
+
+	// Check if colIndex is within range
+	if colIndex > (endColNum - startColNum + 1) {
+		return nil, fmt.Errorf("formula: column index %d out of range", colIndex)
+	}
+
+	targetColNum := startColNum + colIndex - 1
+
+	// Search in first column
+	for row := startRow; row <= endRow; row++ {
+		cellRef := numToCol(startColNum) + strconv.Itoa(row)
+		cell, err := ws.Cells().Get(cellRef)
+		if err != nil {
+			continue
+		}
+
+		match, err := compareValues(cell.Value, lookupVal, "=")
+		if err != nil {
+			continue
+		}
+
+		if match {
+			// Found match - return value from target column
+			targetRef := numToCol(targetColNum) + strconv.Itoa(row)
+			targetCell, err := ws.Cells().Get(targetRef)
+			if err != nil {
+				return nil, fmt.Errorf("formula: target cell %s not found", targetRef)
+			}
+			return targetCell.Value, nil
+		}
+	}
+
+	return nil, fmt.Errorf("formula: value not found")
+}
+
+// resolveRangeRaw returns the raw Cell objects in a range (not just numeric values)
+func resolveRangeRaw(rng string, ws *Worksheet) ([]*Cell, error) {
+	parts := strings.SplitN(rng, ":", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid range %q", rng)
+	}
+	start := strings.TrimSpace(parts[0])
+	end := strings.TrimSpace(parts[1])
+
+	sc, sr := splitRef(start)
+	ec, er := splitRef(end)
+
+	sCol := colToNum(sc)
+	eCol := colToNum(ec)
+
+	if sCol > eCol {
+		sCol, eCol = eCol, sCol
+	}
+	if sr > er {
+		sr, er = er, sr
+	}
+
+	var cells []*Cell
+	for col := sCol; col <= eCol; col++ {
+		for row := sr; row <= er; row++ {
+			ref := numToCol(col) + strconv.Itoa(row)
+			cell, err := ws.Cells().Get(ref)
+			if err != nil {
+				continue // skip missing cells
+			}
+			cells = append(cells, cell)
+		}
+	}
+	return cells, nil
 }

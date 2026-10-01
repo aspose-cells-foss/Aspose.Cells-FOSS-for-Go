@@ -52,6 +52,7 @@ func TestCalculateFormula_AllFunctions(t *testing.T) {
 		{"AVERAGE(A1:A3)", 20},
 		{"MAX(A1:A3)", 30},
 		{"MIN(A1:A3)", 10},
+		{"COUNT(A1:A3)", 3},
 	}
 	for _, tc := range tests {
 		r, err := cells_foss.CalculateFormula(tc.formula, ws)
@@ -86,10 +87,140 @@ func TestCalculateFormula_AllFunctions(t *testing.T) {
 	}
 
 	// Errors.
-	if _, err := cells_foss.CalculateFormula("COUNT(A1:A5)", ws); err == nil {
+	if _, err := cells_foss.CalculateFormula("UNKNOWN(A1:A5)", ws); err == nil {
 		t.Error("unsupported function should error")
 	}
 	if _, err := cells_foss.CalculateFormula("", ws); err == nil {
 		t.Error("empty formula should error")
+	}
+}
+
+func TestCalculateFormula_CONCAT(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	c := ws.Cells()
+
+	c.Set("A1", "Hello")
+	c.Set("A2", " ")
+	c.Set("A3", "World")
+
+	r, err := cells_foss.CalculateFormula("CONCAT(A1:A3)", ws)
+	if err != nil {
+		t.Fatalf("CONCAT: %v", err)
+	}
+	if r != "Hello World" {
+		t.Errorf("CONCAT = %v, want 'Hello World'", r)
+	}
+
+	// CONCAT with multiple arguments
+	r, err = cells_foss.CalculateFormula("CONCAT(A1, A2, A3)", ws)
+	if err != nil {
+		t.Fatalf("CONCAT multi: %v", err)
+	}
+	if r != "Hello World" {
+		t.Errorf("CONCAT multi = %v, want 'Hello World'", r)
+	}
+}
+
+func TestCalculateFormula_IF(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	c := ws.Cells()
+
+	c.Set("A1", float64(10))
+	c.Set("A2", float64(20))
+
+	// IF with comparison
+	r, err := cells_foss.CalculateFormula("IF(A1>5, \"yes\", \"no\")", ws)
+	if err != nil {
+		t.Fatalf("IF: %v", err)
+	}
+	if r != "yes" {
+		t.Errorf("IF = %v, want 'yes'", r)
+	}
+
+	// IF with false condition
+	r, err = cells_foss.CalculateFormula("IF(A1>15, \"yes\", \"no\")", ws)
+	if err != nil {
+		t.Fatalf("IF false: %v", err)
+	}
+	if r != "no" {
+		t.Errorf("IF false = %v, want 'no'", r)
+	}
+
+	// IF without false value
+	r, err = cells_foss.CalculateFormula("IF(A1>15, \"yes\")", ws)
+	if err != nil {
+		t.Fatalf("IF no false: %v", err)
+	}
+	if r != false {
+		t.Errorf("IF no false = %v, want false", r)
+	}
+}
+
+func TestCalculateFormula_COUNTIF(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	c := ws.Cells()
+
+	c.Set("A1", float64(10))
+	c.Set("A2", float64(20))
+	c.Set("A3", float64(30))
+	c.Set("A4", float64(10))
+
+	// COUNTIF with exact match
+	r, err := cells_foss.CalculateFormula("COUNTIF(A1:A4, 10)", ws)
+	if err != nil {
+		t.Fatalf("COUNTIF: %v", err)
+	}
+	if r != float64(2) {
+		t.Errorf("COUNTIF = %v, want 2", r)
+	}
+
+	// COUNTIF with comparison
+	r, err = cells_foss.CalculateFormula("COUNTIF(A1:A4, \">15\")", ws)
+	if err != nil {
+		t.Fatalf("COUNTIF >: %v", err)
+	}
+	if r != float64(2) {
+		t.Errorf("COUNTIF > = %v, want 2", r)
+	}
+}
+
+func TestCalculateFormula_VLOOKUP(t *testing.T) {
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	c := ws.Cells()
+
+	// Create a lookup table
+	c.Set("A1", "Apple")
+	c.Set("B1", float64(1.5))
+	c.Set("A2", "Banana")
+	c.Set("B2", float64(0.5))
+	c.Set("A3", "Cherry")
+	c.Set("B3", float64(2.0))
+
+	// VLOOKUP to find Banana's price
+	r, err := cells_foss.CalculateFormula("VLOOKUP(\"Banana\", A1:B3, 2)", ws)
+	if err != nil {
+		t.Fatalf("VLOOKUP: %v", err)
+	}
+	if r != float64(0.5) {
+		t.Errorf("VLOOKUP = %v, want 0.5", r)
+	}
+
+	// VLOOKUP for Cherry
+	r, err = cells_foss.CalculateFormula("VLOOKUP(\"Cherry\", A1:B3, 2)", ws)
+	if err != nil {
+		t.Fatalf("VLOOKUP Cherry: %v", err)
+	}
+	if r != float64(2.0) {
+		t.Errorf("VLOOKUP Cherry = %v, want 2.0", r)
+	}
+
+	// VLOOKUP not found
+	_, err = cells_foss.CalculateFormula("VLOOKUP(\"Durian\", A1:B3, 2)", ws)
+	if err == nil {
+		t.Error("VLOOKUP not found should error")
 	}
 }

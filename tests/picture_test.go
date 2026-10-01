@@ -82,3 +82,82 @@ func TestPicture_MarksModified(t *testing.T) {
 		t.Error("AddPicture should mark Modified")
 	}
 }
+
+func TestPicture_LoadRoundTrip(t *testing.T) {
+	// 1. Create a workbook with pictures.
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	ws.Cells().Set("A1", "Hello")
+
+	pic1 := cells_foss.NewPicture(cells_foss.MinimalPNG(), "png")
+	pic1.Width = 100
+	pic1.Height = 80
+	pic1.SetAnchor(2, 1)
+	ws.AddPicture(pic1)
+
+	pic2 := cells_foss.NewPicture(cells_foss.MinimalPNG(), "png")
+	pic2.Width = 150
+	pic2.Height = 120
+	pic2.SetAnchor(5, 3)
+	ws.AddPicture(pic2)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pic_load.xlsx")
+	wb.Save(path)
+
+	// 2. Load the workbook and verify pictures are restored.
+	loaded, err := cells_foss.LoadWorkbook(path)
+	if err != nil {
+		t.Fatalf("LoadWorkbook: %v", err)
+	}
+
+	loadedWS := loaded.Worksheets[0]
+	if len(loadedWS.Pictures) != 2 {
+		t.Fatalf("expected 2 pictures, got %d", len(loadedWS.Pictures))
+	}
+
+	// Check first picture.
+	p1 := loadedWS.Pictures[0]
+	if p1.Row != 2 || p1.Col != 1 {
+		t.Errorf("pic1 anchor = (%d,%d), want (2,1)", p1.Row, p1.Col)
+	}
+	if p1.Width != 100 || p1.Height != 80 {
+		t.Errorf("pic1 size = %dx%d, want 100x80", p1.Width, p1.Height)
+	}
+	if p1.Format != "png" {
+		t.Errorf("pic1 format = %q, want png", p1.Format)
+	}
+	if len(p1.Data) == 0 {
+		t.Error("pic1 data is empty")
+	}
+
+	// Check second picture.
+	p2 := loadedWS.Pictures[1]
+	if p2.Row != 5 || p2.Col != 3 {
+		t.Errorf("pic2 anchor = (%d,%d), want (5,3)", p2.Row, p2.Col)
+	}
+	if p2.Width != 150 || p2.Height != 120 {
+		t.Errorf("pic2 size = %dx%d, want 150x120", p2.Width, p2.Height)
+	}
+}
+
+func TestPicture_NoPictures(t *testing.T) {
+	// Create a workbook without pictures.
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	ws.Cells().Set("A1", "No pictures here")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_pic.xlsx")
+	wb.Save(path)
+
+	// Load and verify no pictures.
+	loaded, err := cells_foss.LoadWorkbook(path)
+	if err != nil {
+		t.Fatalf("LoadWorkbook: %v", err)
+	}
+
+	if len(loaded.Worksheets[0].Pictures) != 0 {
+		t.Errorf("expected 0 pictures, got %d", len(loaded.Worksheets[0].Pictures))
+	}
+}

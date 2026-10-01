@@ -102,8 +102,9 @@ type xmlCell struct {
 // present; cells with t="s" receive the corresponding string value rather
 // than the numeric index.
 //
-// When the file is encrypted (detected by the "ECRX" magic header),
-// LoadWorkbook returns an error directing the caller to use LoadWithPassword.
+// When the file is encrypted (detected by the OLE/CFB magic header or the
+// legacy "ECRX" magic header), LoadWorkbook returns an error directing the
+// caller to use LoadWithPassword.
 func LoadWorkbook(path string) (*Workbook, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -111,7 +112,7 @@ func LoadWorkbook(path string) (*Workbook, error) {
 	}
 
 	// Detect encrypted files.
-	if isEncryptedFile(raw) {
+	if isEncryptedFile(raw) || isCFBFile(raw) {
 		return nil, fmt.Errorf("loading workbook: file is encrypted — use LoadWithPassword(path, password)")
 	}
 
@@ -127,12 +128,17 @@ func LoadWithPassword(path string, password string) (*Workbook, error) {
 		return nil, fmt.Errorf("loading workbook: %w", err)
 	}
 
-	if !isEncryptedFile(raw) {
+	if !isEncryptedFile(raw) && !isCFBFile(raw) {
 		// Not encrypted — delegate to standard load.
 		return loadWorkbookFromBytes(raw, path)
 	}
 
-	infoXML, encPkg, err := readEncryptedFile(raw)
+	var infoXML, encPkg []byte
+	if isCFBFile(raw) {
+		infoXML, encPkg, err = readCFBEncrypted(raw)
+	} else {
+		infoXML, encPkg, err = readEncryptedFile(raw)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("loading workbook: %w", err)
 	}
@@ -217,7 +223,13 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 		wb.Worksheets[i].Tables = tables
 	}
 
-	// 7. Wire parent references.
+	// 7. Load drawings (pictures).
+	for i := range wb.Worksheets {
+		pictures, _ := loadDrawings(zr, i)
+		wb.Worksheets[i].Pictures = pictures
+	}
+
+	// 8. Wire parent references.
 	for _, ws := range wb.Worksheets {
 		ws.cells.setParent(wb)
 		ws.cells.setWorksheet(ws)
@@ -258,7 +270,7 @@ func parseWorkbookXML(zr *zip.Reader) ([]sheetDef, error) {
 	return defs, nil
 }
 
-func parseWorksheetXML(zr *zip.Reader, fullPath string, ss map[int]string) (*Worksheet, []byte, error) {
+func parseWorksheetXML(zr *zip.Reader, fullPath string, ss []string) (*Worksheet, []byte, error) {
 	raw, err := readZipFile(zr, fullPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot read %s: %w", fullPath, err)
@@ -298,6 +310,8 @@ func parseWorksheetXML(zr *zip.Reader, fullPath string, ss map[int]string) (*Wor
 			ws.DataValidations = append(ws.DataValidations, dv)
 		}
 	}
+	// Load conditional formatting.
+	loadConditionalFormattings(ws, raw)
 	return ws, raw, nil
 }
 
@@ -312,7 +326,7 @@ type sheetDef struct {
 // Helper: resolve the effective cell value (shared string or literal)
 // ---------------------------------------------------------------------------
 
-func resolveCellValue(c xmlCell, ss map[int]string) interface{} {
+func resolveCellValue(c xmlCell, ss []string) interface{} {
 	if c.V == "" {
 		return nil
 	}
@@ -323,8 +337,8 @@ func resolveCellValue(c xmlCell, ss map[int]string) interface{} {
 		if err != nil {
 			return c.V // fallback: return the raw index
 		}
-		if s, ok := ss[idx]; ok {
-			return s
+		if idx >= 0 && idx < len(ss) {
+			return ss[idx]
 		}
 		return c.V
 	}

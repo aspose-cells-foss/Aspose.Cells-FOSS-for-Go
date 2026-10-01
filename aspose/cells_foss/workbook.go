@@ -36,16 +36,17 @@ type Workbook struct {
 	// FilePath is the on-disk path from which the workbook was loaded, or the
 	// path to which it was last saved.
 	FilePath string
+
+	// vbaProject holds the VBA project data for macro-enabled workbooks.
+	vbaProject *VBAProject
 }
 
 // SetPassword configures an open password for the workbook.  Subsequent
 // calls to Save will produce an encrypted .xlsx file that requires this
 // password to open.  Pass an empty string to remove password protection.
 //
-// Deprecated: The encrypted output uses a custom ECRX container format
-// that only this library can read; Microsoft Excel cannot open it.
-// The key derivation is standard ECMA-376 Agile Encryption, but the
-// wrapping format is non-standard.
+// The encrypted output uses the standard OLE/CFB container format with
+// ECMA-376 Agile Encryption, compatible with Microsoft Excel.
 func (wb *Workbook) SetPassword(password string) error {
 	if wb == nil {
 		return fmt.Errorf("cells_foss: workbook is nil")

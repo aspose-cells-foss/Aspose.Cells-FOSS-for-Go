@@ -121,12 +121,12 @@ func encodeUTF16LE(s string) []byte {
 // ---------------------------------------------------------------------------
 
 // encryptPackage encrypts plaintext using the Agile Encryption scheme.
-// Returns the EncryptionInfo XML and the encrypted data.
-func encryptPackage(plaintext []byte, password string) ([]byte, []byte, error) {
+// Returns the EncryptionInfo XML, the encrypted data, and the original size.
+func encryptPackage(plaintext []byte, password string) ([]byte, []byte, uint64, error) {
 	// 1. Generate salt.
 	salt := make([]byte, saltSize)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, nil, fmt.Errorf("encryption: salt: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: salt: %w", err)
 	}
 
 	// 2. Derive key from password.
@@ -135,33 +135,33 @@ func encryptPackage(plaintext []byte, password string) ([]byte, []byte, error) {
 	// 3. Generate random intermediate key and verifier.
 	encKey := make([]byte, keyBits/8)
 	if _, err := io.ReadFull(rand.Reader, encKey); err != nil {
-		return nil, nil, fmt.Errorf("encryption: encKey: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: encKey: %w", err)
 	}
 	verifier := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, verifier); err != nil {
-		return nil, nil, fmt.Errorf("encryption: verifier: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: verifier: %w", err)
 	}
 
 	// 4. Encrypt the intermediate key with the derived key.
 	encryptedKeyValue, err := aesCBCEncrypt(derived, encKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("encryption: encrypt key: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: encrypt key: %w", err)
 	}
 	encryptedVerifier, err := aesCBCEncrypt(derived, verifier)
 	if err != nil {
-		return nil, nil, fmt.Errorf("encryption: encrypt verifier: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: encrypt verifier: %w", err)
 	}
 
 	// 5. Encrypt the package data with the intermediate key.
 	encryptedData, err := aesCBCEncrypt(encKey, plaintext)
 	if err != nil {
-		return nil, nil, fmt.Errorf("encryption: encrypt package: %w", err)
+		return nil, nil, 0, fmt.Errorf("encryption: encrypt package: %w", err)
 	}
 
 	// 6. Build EncryptionInfo XML.
 	infoXML := buildEncryptionInfoXML(salt, encryptedKeyValue, encryptedVerifier)
 
-	return infoXML, encryptedData, nil
+	return infoXML, encryptedData, uint64(len(plaintext)), nil
 }
 
 // decryptPackage decrypts ciphertext using the password and the

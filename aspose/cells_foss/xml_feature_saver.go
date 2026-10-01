@@ -734,3 +734,141 @@ func generateContentTypesForDrawings(worksheets []*Worksheet) string {
 	}
 	return b.String()
 }
+
+// ======================================================================
+// Conditional formatting XML generation
+// ======================================================================
+
+type outConditionalFormatting struct {
+	Ref   string      `xml:"ref,attr"`
+	Rules []outCFRule `xml:"cfRule"`
+}
+
+type outCFRule struct {
+	Type       string `xml:"type,attr"`
+	Operator   string `xml:"operator,attr,omitempty"`
+	Priority   int    `xml:"priority,attr"`
+	Formula    string `xml:"formula,omitempty"`
+	Formula2   string `xml:"formula2,omitempty"`
+	Text       string `xml:"text,attr,omitempty"`
+	StopIfTrue int    `xml:"stopIfTrue,attr,omitempty"`
+	DxfID      int    `xml:"dxfId,attr,omitempty"`
+}
+
+func buildConditionalFormattings(cfs []*ConditionalFormatting) []outConditionalFormatting {
+	if len(cfs) == 0 {
+		return nil
+	}
+	out := make([]outConditionalFormatting, len(cfs))
+	for i, cf := range cfs {
+		rules := make([]outCFRule, len(cf.Rules))
+		for j, rule := range cf.Rules {
+			stopIfTrue := 0
+			if rule.StopIfTrue {
+				stopIfTrue = 1
+			}
+			rules[j] = outCFRule{
+				Type:       rule.Type,
+				Operator:   rule.Operator,
+				Priority:   rule.Priority,
+				Formula:    rule.Formula,
+				Formula2:   rule.Formula2,
+				Text:       rule.Text,
+				StopIfTrue: stopIfTrue,
+				DxfID:      rule.StyleID,
+			}
+		}
+		out[i] = outConditionalFormatting{
+			Ref:   cf.Ref,
+			Rules: rules,
+		}
+	}
+	return out
+}
+
+// ======================================================================
+// Chart XML generation
+// ======================================================================
+
+// generateChartXML produces the content of xl/charts/chartN.xml.
+func generateChartXML(chart *Chart, sheetName string) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
+	b.WriteString(`<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` + "\n")
+	b.WriteString(`  <c:chart>` + "\n")
+
+	if chart.Title != "" {
+		b.WriteString(fmt.Sprintf(`    <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>%s</a:t></a:r></a:p></c:rich></c:tx></c:title>`+"\n", xmlEscape(chart.Title)))
+	}
+
+	// Plot area with chart type.
+	b.WriteString(`    <c:plotArea>` + "\n")
+	b.WriteString(`      <c:layout/>` + "\n")
+
+	switch chart.Type {
+	case ChartTypeBar:
+		b.WriteString(`      <c:barChart>` + "\n")
+		b.WriteString(`        <c:barDir val="col"/>` + "\n")
+		b.WriteString(`        <c:grouping val="clustered"/>` + "\n")
+		for i, series := range chart.Series {
+			b.WriteString(fmt.Sprintf(`        <c:ser><c:idx val="%d"/><c:order val="%d"/>`, i, i))
+			if series.Name != "" {
+				b.WriteString(fmt.Sprintf(`<c:tx><c:strRef><c:f>'%s'!%s</c:f></c:strRef></c:tx>`, xmlEscape(sheetName), xmlEscape(series.Name)))
+			}
+			if series.Categories != "" {
+				b.WriteString(fmt.Sprintf(`<c:cat><c:strRef><c:f>'%s'!%s</c:f></c:strRef></c:cat>`, xmlEscape(sheetName), xmlEscape(series.Categories)))
+			}
+			if series.Values != "" {
+				b.WriteString(fmt.Sprintf(`<c:val><c:numRef><c:f>'%s'!%s</c:f></c:numRef></c:val>`, xmlEscape(sheetName), xmlEscape(series.Values)))
+			}
+			b.WriteString(`</c:ser>` + "\n")
+		}
+		b.WriteString(`      </c:barChart>` + "\n")
+	case ChartTypeLine:
+		b.WriteString(`      <c:lineChart>` + "\n")
+		b.WriteString(`        <c:grouping val="standard"/>` + "\n")
+		for i, series := range chart.Series {
+			b.WriteString(fmt.Sprintf(`        <c:ser><c:idx val="%d"/><c:order val="%d"/>`, i, i))
+			if series.Name != "" {
+				b.WriteString(fmt.Sprintf(`<c:tx><c:strRef><c:f>'%s'!%s</c:f></c:strRef></c:tx>`, xmlEscape(sheetName), xmlEscape(series.Name)))
+			}
+			if series.Categories != "" {
+				b.WriteString(fmt.Sprintf(`<c:cat><c:strRef><c:f>'%s'!%s</c:f></c:strRef></c:cat>`, xmlEscape(sheetName), xmlEscape(series.Categories)))
+			}
+			if series.Values != "" {
+				b.WriteString(fmt.Sprintf(`<c:val><c:numRef><c:f>'%s'!%s</c:f></c:numRef></c:val>`, xmlEscape(sheetName), xmlEscape(series.Values)))
+			}
+			b.WriteString(`</c:ser>` + "\n")
+		}
+		b.WriteString(`      </c:lineChart>` + "\n")
+	case ChartTypePie:
+		b.WriteString(`      <c:pieChart>` + "\n")
+		if len(chart.Series) > 0 {
+			series := chart.Series[0]
+			b.WriteString(`        <c:ser><c:idx val="0"/><c:order val="0"/>`)
+			if series.Categories != "" {
+				b.WriteString(fmt.Sprintf(`<c:cat><c:strRef><c:f>'%s'!%s</c:f></c:strRef></c:cat>`, xmlEscape(sheetName), xmlEscape(series.Categories)))
+			}
+			if series.Values != "" {
+				b.WriteString(fmt.Sprintf(`<c:val><c:numRef><c:f>'%s'!%s</c:f></c:numRef></c:val>`, xmlEscape(sheetName), xmlEscape(series.Values)))
+			}
+			b.WriteString(`</c:ser>` + "\n")
+		}
+		b.WriteString(`      </c:pieChart>` + "\n")
+	}
+
+	b.WriteString(`    </c:plotArea>` + "\n")
+	b.WriteString(`  </c:chart>` + "\n")
+	b.WriteString(`</c:chartSpace>` + "\n")
+	return b.String()
+}
+
+// xmlEscape escapes special XML characters.
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&apos;")
+	return s
+}

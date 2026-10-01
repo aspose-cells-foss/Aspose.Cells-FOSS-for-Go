@@ -26,6 +26,16 @@ type Worksheet struct {
 	// Pictures holds the images embedded on this worksheet.
 	Pictures []*Picture
 
+	// ConditionalFormattings holds the conditional formatting rules applied
+	// to this worksheet.
+	ConditionalFormattings []*ConditionalFormatting
+
+	// Charts holds the charts embedded on this worksheet.
+	Charts []*Chart
+
+	// PivotTables holds the pivot tables defined on this worksheet.
+	PivotTables []*PivotTable
+
 	// sourceXML caches the raw XML bytes of this worksheet as read from the
 	// .xlsx file. When the sheet has not been modified this payload is
 	// written back verbatim to preserve round-trip fidelity.
