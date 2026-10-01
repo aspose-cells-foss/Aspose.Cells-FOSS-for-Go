@@ -102,9 +102,8 @@ flowchart TD
 go get github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss
 ```
 
-<<<<<<< HEAD
-Requires **Go 1.24.5+** (see `go.mod`). Depends only on the Go standard library — no third-party modules.
-=======
+# Requires **Go 1.24.5+** (see `go.mod`). Depends only on the Go standard library — no third-party modules.
+
 The module supports Go 1.24.5 or later and has zero third-party dependencies — encryption and
 everything else builds on the Go standard library alone. Because the package name (`cells_foss`)
 differs from the module path's final segment (`v26`), import it with an explicit alias:
@@ -122,7 +121,6 @@ No required third-party package dependencies.
 ### Native and System Requirements
 
 - Go 1.24 or later (`go.mod`'s own `go 1.24.5` directive).
-  > > > > > > > fa4e890e46c509efd22d09b97411202c2b0b8a67
 
 ## Quick Start
 
