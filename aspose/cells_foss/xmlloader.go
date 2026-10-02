@@ -229,7 +229,19 @@ func loadWorkbookFromReader(zr *zip.Reader, path string) (*Workbook, error) {
 		wb.Worksheets[i].Pictures = pictures
 	}
 
-	// 8. Wire parent references.
+	// 8. Load charts.
+	for i := range wb.Worksheets {
+		charts, _ := loadCharts(zr, i)
+		wb.Worksheets[i].Charts = charts
+	}
+
+	// 9. Load pivot tables.
+	for i := range wb.Worksheets {
+		pivotTables, _ := loadPivotTables(zr, i)
+		wb.Worksheets[i].PivotTables = pivotTables
+	}
+
+	// 10. Wire parent references.
 	for _, ws := range wb.Worksheets {
 		ws.cells.setParent(wb)
 		ws.cells.setWorksheet(ws)

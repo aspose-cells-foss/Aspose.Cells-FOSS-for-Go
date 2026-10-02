@@ -511,3 +511,353 @@ func loadConditionalFormattings(ws *Worksheet, rawXML []byte) error {
 	}
 	return nil
 }
+
+// ======================================================================
+// Internal XML types for decoding chart XML
+// ======================================================================
+
+type xmlChartSpace struct {
+	XMLName xml.Name  `xml:"http://schemas.openxmlformats.org/drawingml/2006/chart chartSpace"`
+	Chart   xmlChart  `xml:"chart"`
+}
+
+type xmlChart struct {
+	Title    *xmlChartTitle `xml:"title,omitempty"`
+	PlotArea xmlPlotArea    `xml:"plotArea"`
+}
+
+type xmlChartTitle struct {
+	Tx xmlChartTx `xml:"tx"`
+}
+
+type xmlChartTx struct {
+	Rich xmlChartRich `xml:"rich"`
+}
+
+type xmlChartRich struct {
+	P xmlChartP `xml:"p"`
+}
+
+type xmlChartP struct {
+	R []xmlChartR `xml:"r"`
+}
+
+type xmlChartR struct {
+	T string `xml:"t"`
+}
+
+type xmlPlotArea struct {
+	BarChart  *xmlBarChart  `xml:"barChart,omitempty"`
+	LineChart *xmlLineChart `xml:"lineChart,omitempty"`
+	PieChart  *xmlPieChart  `xml:"pieChart,omitempty"`
+}
+
+type xmlBarChart struct {
+	Series []xmlChartSeries `xml:"ser"`
+}
+
+type xmlLineChart struct {
+	Series []xmlChartSeries `xml:"ser"`
+}
+
+type xmlPieChart struct {
+	Series []xmlChartSeries `xml:"ser"`
+}
+
+type xmlChartSeries struct {
+	Tx   xmlChartSeriesTx  `xml:"tx,omitempty"`
+	Cat  xmlChartSeriesRef `xml:"cat,omitempty"`
+	Val  xmlChartSeriesRef `xml:"val,omitempty"`
+}
+
+type xmlChartSeriesTx struct {
+	StrRef xmlChartStrRef `xml:"strRef"`
+}
+
+type xmlChartSeriesRef struct {
+	StrRef xmlChartStrRef `xml:"strRef,omitempty"`
+	NumRef xmlChartNumRef `xml:"numRef,omitempty"`
+}
+
+type xmlChartStrRef struct {
+	F string `xml:"f"`
+}
+
+type xmlChartNumRef struct {
+	F string `xml:"f"`
+}
+
+// loadCharts reads the chart definitions for the given sheet index.
+func loadCharts(zr *zip.Reader, sheetIndex int) ([]*Chart, error) {
+	// 1. Find the chart relationships in sheet rels.
+	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
+	relsRaw, err := readZipFile(zr, relsPath)
+	if err != nil {
+		return nil, nil // No rels means no charts
+	}
+
+	var rels xmlRelationships
+	if err := xml.Unmarshal(relsRaw, &rels); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", relsPath, err)
+	}
+
+	var charts []*Chart
+	for _, rel := range rels.Rels {
+		if !strings.Contains(rel.Target, "charts/") {
+			continue
+		}
+
+		// Resolve chart path
+		chartPath := path.Clean(path.Join("xl/worksheets", rel.Target))
+		raw, err := readZipFile(zr, chartPath)
+		if err != nil {
+			continue
+		}
+
+		// Parse chart XML
+		var chartSpace xmlChartSpace
+		if err := xml.Unmarshal(raw, &chartSpace); err != nil {
+			continue
+		}
+
+		chart := &Chart{
+			Width:  400, // Default width
+			Height: 300, // Default height
+		}
+
+		// Extract title
+		if chartSpace.Chart.Title != nil {
+			for _, r := range chartSpace.Chart.Title.Tx.Rich.P.R {
+				chart.Title += r.T
+			}
+		}
+
+		// Determine chart type and extract series
+		if chartSpace.Chart.PlotArea.BarChart != nil {
+			chart.Type = ChartTypeBar
+			for _, ser := range chartSpace.Chart.PlotArea.BarChart.Series {
+				series := extractChartSeries(ser)
+				chart.Series = append(chart.Series, series)
+			}
+		} else if chartSpace.Chart.PlotArea.LineChart != nil {
+			chart.Type = ChartTypeLine
+			for _, ser := range chartSpace.Chart.PlotArea.LineChart.Series {
+				series := extractChartSeries(ser)
+				chart.Series = append(chart.Series, series)
+			}
+		} else if chartSpace.Chart.PlotArea.PieChart != nil {
+			chart.Type = ChartTypePie
+			if len(chartSpace.Chart.PlotArea.PieChart.Series) > 0 {
+				series := extractChartSeries(chartSpace.Chart.PlotArea.PieChart.Series[0])
+				chart.Series = append(chart.Series, series)
+			}
+		}
+
+		charts = append(charts, chart)
+	}
+
+	return charts, nil
+}
+
+// extractChartSeries extracts a ChartSeries from XML.
+func extractChartSeries(ser xmlChartSeries) *ChartSeries {
+	series := &ChartSeries{}
+
+	// Extract series name
+	if ser.Tx.StrRef.F != "" {
+		series.Name = extractRangeFromFormula(ser.Tx.StrRef.F)
+	}
+
+	// Extract categories
+	if ser.Cat.StrRef.F != "" {
+		series.Categories = extractRangeFromFormula(ser.Cat.StrRef.F)
+	} else if ser.Cat.NumRef.F != "" {
+		series.Categories = extractRangeFromFormula(ser.Cat.NumRef.F)
+	}
+
+	// Extract values
+	if ser.Val.NumRef.F != "" {
+		series.Values = extractRangeFromFormula(ser.Val.NumRef.F)
+	} else if ser.Val.StrRef.F != "" {
+		series.Values = extractRangeFromFormula(ser.Val.StrRef.F)
+	}
+
+	return series
+}
+
+// extractRangeFromFormula extracts a cell range from a formula like "'Sheet1'!$A$1:$A$10"
+func extractRangeFromFormula(formula string) string {
+	// Remove sheet name and quotes
+	if idx := strings.Index(formula, "!"); idx >= 0 {
+		formula = formula[idx+1:]
+	}
+
+	// Remove $ signs
+	formula = strings.ReplaceAll(formula, "$", "")
+
+	return formula
+}
+
+// ======================================================================
+// Internal XML types for decoding pivot table XML
+// ======================================================================
+
+type xmlPivotTableDefinition struct {
+	XMLName     xml.Name             `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotTableDefinition"`
+	Name        string               `xml:"name,attr"`
+	CacheID     int                  `xml:"cacheId,attr"`
+	Location    xmlPivotLocation     `xml:"location"`
+	PivotFields xmlPivotFields       `xml:"pivotFields"`
+	RowFields   *xmlPivotFieldRefs   `xml:"rowFields,omitempty"`
+	ColFields   *xmlPivotFieldRefs   `xml:"colFields,omitempty"`
+	DataFields  *xmlPivotDataFields  `xml:"dataFields,omitempty"`
+}
+
+type xmlPivotLocation struct {
+	Ref string `xml:"ref,attr"`
+}
+
+type xmlPivotFields struct {
+	Count  int              `xml:"count,attr"`
+	Fields []xmlPivotField  `xml:"pivotField"`
+}
+
+type xmlPivotField struct {
+	Name string `xml:"name,attr,omitempty"`
+	Axis string `xml:"axis,attr,omitempty"`
+}
+
+type xmlPivotFieldRefs struct {
+	Count  int              `xml:"count,attr"`
+	Fields []xmlPivotFieldRef `xml:"field"`
+}
+
+type xmlPivotFieldRef struct {
+	X int `xml:"x,attr"`
+}
+
+type xmlPivotDataFields struct {
+	Count  int                  `xml:"count,attr"`
+	Fields []xmlPivotDataField  `xml:"dataField"`
+}
+
+type xmlPivotDataField struct {
+	Name     string `xml:"name,attr"`
+	Field    int    `xml:"fld,attr"`
+	Subtotal string `xml:"subtotal,attr,omitempty"`
+}
+
+type xmlPivotCacheDefinition struct {
+	XMLName      xml.Name           `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotCacheDefinition"`
+	CacheSource  xmlCacheSource     `xml:"cacheSource"`
+	CacheFields  xmlCacheFields     `xml:"cacheFields"`
+}
+
+type xmlCacheSource struct {
+	Type             string          `xml:"type,attr"`
+	WorksheetSource  xmlWorksheetSrc `xml:"worksheetSource"`
+}
+
+type xmlWorksheetSrc struct {
+	Ref   string `xml:"ref,attr"`
+	Sheet string `xml:"sheet,attr"`
+}
+
+type xmlCacheFields struct {
+	Count  int            `xml:"count,attr"`
+	Fields []xmlCacheField `xml:"cacheField"`
+}
+
+type xmlCacheField struct {
+	Name string `xml:"name,attr"`
+}
+
+// loadPivotTables reads the pivot table definitions for the given sheet index.
+func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
+	// 1. Find the pivot table relationships in sheet rels.
+	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
+	relsRaw, err := readZipFile(zr, relsPath)
+	if err != nil {
+		return nil, nil // No rels means no pivot tables
+	}
+
+	var rels xmlRelationships
+	if err := xml.Unmarshal(relsRaw, &rels); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", relsPath, err)
+	}
+
+	var pivotTables []*PivotTable
+	for _, rel := range rels.Rels {
+		if !strings.Contains(rel.Target, "pivotTables/") {
+			continue
+		}
+
+		// Resolve pivot table path
+		ptPath := path.Clean(path.Join("xl/worksheets", rel.Target))
+		raw, err := readZipFile(zr, ptPath)
+		if err != nil {
+			continue
+		}
+
+		// Parse pivot table XML
+		var ptDef xmlPivotTableDefinition
+		if err := xml.Unmarshal(raw, &ptDef); err != nil {
+			continue
+		}
+
+		pt := &PivotTable{
+			Name: ptDef.Name,
+			Ref:  ptDef.Location.Ref,
+		}
+
+		// Extract row fields
+		if ptDef.RowFields != nil {
+			for _, fieldRef := range ptDef.RowFields.Fields {
+				if fieldRef.X < len(ptDef.PivotFields.Fields) {
+					fieldName := ptDef.PivotFields.Fields[fieldRef.X].Name
+					if fieldName != "" {
+						pt.RowFields = append(pt.RowFields, fieldName)
+					}
+				}
+			}
+		}
+
+		// Extract col fields
+		if ptDef.ColFields != nil {
+			for _, fieldRef := range ptDef.ColFields.Fields {
+				if fieldRef.X < len(ptDef.PivotFields.Fields) {
+					fieldName := ptDef.PivotFields.Fields[fieldRef.X].Name
+					if fieldName != "" {
+						pt.ColFields = append(pt.ColFields, fieldName)
+					}
+				}
+			}
+		}
+
+		// Extract data fields
+		if ptDef.DataFields != nil {
+			for _, df := range ptDef.DataFields.Fields {
+				dataField := &PivotDataField{
+					Name:        df.Name,
+					DisplayName: df.Name,
+					Aggregation: df.Subtotal,
+				}
+				pt.DataFields = append(pt.DataFields, dataField)
+			}
+		}
+
+		// Try to load cache definition to get source ref
+		cachePath := fmt.Sprintf("xl/pivotCache/pivotCacheDefinition%d.xml", ptDef.CacheID)
+		cacheRaw, err := readZipFile(zr, cachePath)
+		if err == nil {
+			var cacheDef xmlPivotCacheDefinition
+			if err := xml.Unmarshal(cacheRaw, &cacheDef); err == nil {
+				pt.SourceRef = cacheDef.CacheSource.WorksheetSource.Ref
+			}
+		}
+
+		pivotTables = append(pivotTables, pt)
+	}
+
+	return pivotTables, nil
+}

@@ -19,6 +19,19 @@ type outStyleSheet struct {
 	Borders      outBorders `xml:"borders"`
 	CellStyleXfs outCellXfs `xml:"cellStyleXfs"`
 	CellXfs      outCellXfs `xml:"cellXfs"`
+	Dxfs         *outDxfs   `xml:"dxfs,omitempty"`
+}
+
+type outDxfs struct {
+	Count int      `xml:"count,attr"`
+	Dxfs  []outDxf `xml:"dxf"`
+}
+
+type outDxf struct {
+	Font      *outFont      `xml:"font,omitempty"`
+	Fill      *outFill      `xml:"fill,omitempty"`
+	Border    *outBorder    `xml:"border,omitempty"`
+	Alignment *outAlign     `xml:"alignment,omitempty"`
 }
 
 type outFonts struct {
@@ -173,6 +186,12 @@ func generateStylesXML(wb *Workbook) string {
 			Xfs:   []outXf{{NumFmtId: 0, FontId: 0, FillId: 0, BorderId: 0, XfId: 0}},
 		},
 		CellXfs: outCellXfs{Count: xfCount, Xfs: cellXfs},
+	}
+
+	// ---- Build DXF table from conditional formatting rules ----
+	dxfTable := buildDxfTable(wb.Worksheets)
+	if len(dxfTable) > 0 {
+		ss.Dxfs = &outDxfs{Count: len(dxfTable), Dxfs: dxfTable}
 	}
 
 	return marshalXML(ss)
@@ -345,6 +364,138 @@ func joinSorted(ss []string) string {
 		s += v
 	}
 	return s
+}
+
+// ======================================================================
+// DXF (Differential Formatting) table builder
+// ======================================================================
+
+// buildDxfTable collects all unique styles used in conditional formatting rules
+// across all worksheets and returns them as DXF elements.
+func buildDxfTable(worksheets []*Worksheet) []outDxf {
+	seen := make(map[string]int)
+	var table []outDxf
+
+	for _, ws := range worksheets {
+		for _, cf := range ws.ConditionalFormattings {
+			for _, rule := range cf.Rules {
+				if rule.Style == nil {
+					continue
+				}
+
+				key := dxfKey(rule.Style)
+				if idx, ok := seen[key]; ok {
+					rule.StyleID = idx
+					continue
+				}
+
+				// Create new DXF element
+				dxf := outDxf{}
+
+				// Font
+				if rule.Style.Font != nil {
+					font := &outFont{
+						Sz:   outVal{Val: strconv.FormatFloat(rule.Style.Font.Size, 'f', -1, 64)},
+						Name: outVal{Val: rule.Style.Font.Name},
+					}
+					if rule.Style.Font.Bold {
+						font.B = &outEmpty{}
+					}
+					if rule.Style.Font.Italic {
+						font.I = &outEmpty{}
+					}
+					if rule.Style.Font.Color != "" && rule.Style.Font.Color != "FF000000" {
+						font.Color = &outColor{RGB: rule.Style.Font.Color}
+					}
+					dxf.Font = font
+				}
+
+				// Fill
+				if rule.Style.Fill != nil && rule.Style.Fill.Type != "" && rule.Style.Fill.Type != "none" {
+					fill := &outFill{PatternFill: &outPatternFill{PatternType: rule.Style.Fill.Type}}
+					if rule.Style.Fill.Color != "" {
+						fill.PatternFill.FgColor = &outColor{RGB: rule.Style.Fill.Color}
+					}
+					dxf.Fill = fill
+				}
+
+				// Border
+				if rule.Style.Border != nil && (rule.Style.Border.Top || rule.Style.Border.Bottom || rule.Style.Border.Left || rule.Style.Border.Right) {
+					border := &outBorder{}
+					if rule.Style.Border.Left {
+						border.Left = &outBorderSide{Style: "thin"}
+					} else {
+						border.Left = &outBorderSide{}
+					}
+					if rule.Style.Border.Right {
+						border.Right = &outBorderSide{Style: "thin"}
+					} else {
+						border.Right = &outBorderSide{}
+					}
+					if rule.Style.Border.Top {
+						border.Top = &outBorderSide{Style: "thin"}
+					} else {
+						border.Top = &outBorderSide{}
+					}
+					if rule.Style.Border.Bottom {
+						border.Bottom = &outBorderSide{Style: "thin"}
+					} else {
+						border.Bottom = &outBorderSide{}
+					}
+					dxf.Border = border
+				}
+
+				// Alignment
+				if rule.Style.Alignment != nil && (rule.Style.Alignment.Horizontal != "" || rule.Style.Alignment.Vertical != "" || rule.Style.Alignment.WrapText) {
+					align := &outAlign{
+						Horizontal: rule.Style.Alignment.Horizontal,
+						Vertical:   rule.Style.Alignment.Vertical,
+					}
+					if rule.Style.Alignment.WrapText {
+						align.WrapText = "1"
+					}
+					dxf.Alignment = align
+				}
+
+				seen[key] = len(table)
+				rule.StyleID = len(table)
+				table = append(table, dxf)
+			}
+		}
+	}
+
+	return table
+}
+
+// dxfKey creates a unique key for a Style to deduplicate DXF elements.
+func dxfKey(s *Style) string {
+	if s == nil {
+		return ""
+	}
+	key := "DXF:"
+	if s.Font != nil {
+		key += "F:" + s.Font.Name + "|" +
+			strconv.FormatFloat(s.Font.Size, 'f', -1, 64) + "|" +
+			strconv.FormatBool(s.Font.Bold) + "|" +
+			strconv.FormatBool(s.Font.Italic) + "|" +
+			s.Font.Color + "|"
+	}
+	if s.Fill != nil {
+		key += "L:" + s.Fill.Type + "|" + s.Fill.Color + "|"
+	}
+	if s.Border != nil {
+		key += "B:" + strconv.FormatBool(s.Border.Top) + "|" +
+			strconv.FormatBool(s.Border.Bottom) + "|" +
+			strconv.FormatBool(s.Border.Left) + "|" +
+			strconv.FormatBool(s.Border.Right) + "|" +
+			s.Border.Color + "|"
+	}
+	if s.Alignment != nil {
+		key += "A:" + s.Alignment.Horizontal + "|" +
+			s.Alignment.Vertical + "|" +
+			strconv.FormatBool(s.Alignment.WrapText)
+	}
+	return key
 }
 
 // ======================================================================
@@ -676,11 +827,11 @@ func generateDrawingRelsXML(pictures []*Picture, globalPicIdx int) string {
 }
 
 // generateUnifiedSheetRelsXML produces xl/worksheets/_rels/sheetN.xml.rels
-// containing relationships for both tables and the drawing (when present).
-// rIds are assigned sequentially: tables first, then drawing.
+// containing relationships for tables, drawing, charts, and pivot tables (when present).
+// rIds are assigned sequentially: tables first, then drawing, charts, pivot tables.
 // sheetIndex is the 0-based sheet index used to name the drawing part.
-func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture, sheetIndex int) string {
-	if len(tables) == 0 && len(pictures) == 0 {
+func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture, charts []*Chart, pivotTables []*PivotTable, sheetIndex int) string {
+	if len(tables) == 0 && len(pictures) == 0 && len(charts) == 0 && len(pivotTables) == 0 {
 		return ""
 	}
 	var b strings.Builder
@@ -695,6 +846,15 @@ func generateUnifiedSheetRelsXML(tables []*Table, pictures []*Picture, sheetInde
 	}
 	if len(pictures) > 0 {
 		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing%d.xml"/>`+"\n", rid, sheetIndex+1)
+		rid++
+	}
+	for i := range charts {
+		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart%d.xml"/>`+"\n", rid, i+1)
+		rid++
+	}
+	for i := range pivotTables {
+		fmt.Fprintf(&b, `  <Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable%d.xml"/>`+"\n", rid, i+1)
+		rid++
 	}
 
 	b.WriteString(`</Relationships>` + "\n")
@@ -791,6 +951,7 @@ func buildConditionalFormattings(cfs []*ConditionalFormatting) []outConditionalF
 // ======================================================================
 
 // generateChartXML produces the content of xl/charts/chartN.xml.
+// DEPRECATED: Use generateChartXMLFull instead for complete chart support.
 func generateChartXML(chart *Chart, sheetName string) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
@@ -871,4 +1032,224 @@ func xmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "\"", "&quot;")
 	s = strings.ReplaceAll(s, "'", "&apos;")
 	return s
+}
+
+// ======================================================================
+// Chart integration helpers
+// ======================================================================
+
+// generateContentTypesForCharts returns <Override> elements for chart parts.
+func generateContentTypesForCharts(worksheets []*Worksheet) string {
+	var b strings.Builder
+	for _, ws := range worksheets {
+		for i := range ws.Charts {
+			fmt.Fprintf(&b, `  <Override PartName="/xl/charts/chart%d.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>`+"\n", i+1)
+		}
+	}
+	return b.String()
+}
+
+// ======================================================================
+// Pivot Table XML generation
+// ======================================================================
+
+type outPivotTableDefinition struct {
+	XMLName         xml.Name                   `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotTableDefinition"`
+	Name            string                     `xml:"name,attr"`
+	CacheID         int                        `xml:"cacheId,attr"`
+	DataOnRows      int                        `xml:"dataOnRows,attr"`
+	DataCaption     string                     `xml:"dataCaption,attr"`
+	Location        outPivotLocation           `xml:"location"`
+	PivotFields     outPivotFields             `xml:"pivotFields"`
+	RowFields       *outPivotRowFields         `xml:"rowFields,omitempty"`
+	ColFields       *outPivotColFields         `xml:"colFields,omitempty"`
+	DataFields      *outPivotDataFields        `xml:"dataFields,omitempty"`
+	PivotTableStyle outPivotTableStyleInfo     `xml:"pivotTableStyleInfo"`
+}
+
+type outPivotLocation struct {
+	Ref         string `xml:"ref,attr"`
+	FirstRowCol int    `xml:"firstRowCol,attr"`
+}
+
+type outPivotFields struct {
+	Count  int              `xml:"count,attr"`
+	Fields []outPivotField  `xml:"pivotField"`
+}
+
+type outPivotField struct {
+	Name      string `xml:"name,attr,omitempty"`
+	Axis      string `xml:"axis,attr,omitempty"`
+	ShowAll   int    `xml:"showAll,attr"`
+}
+
+type outPivotRowFields struct {
+	Count int              `xml:"count,attr"`
+	Fields []outPivotFieldRef `xml:"field"`
+}
+
+type outPivotColFields struct {
+	Count int              `xml:"count,attr"`
+	Fields []outPivotFieldRef `xml:"field"`
+}
+
+type outPivotFieldRef struct {
+	X int `xml:"x,attr"`
+}
+
+type outPivotDataFields struct {
+	Count  int                  `xml:"count,attr"`
+	Fields []outPivotDataField  `xml:"dataField"`
+}
+
+type outPivotDataField struct {
+	Name     string `xml:"name,attr"`
+	Field    int    `xml:"fld,attr"`
+	Subtotal string `xml:"subtotal,attr,omitempty"`
+}
+
+type outPivotTableStyleInfo struct {
+	Name              string `xml:"name,attr"`
+	ShowRowHeaders    int    `xml:"showRowHeaders,attr"`
+	ShowColHeaders    int    `xml:"showColHeaders,attr"`
+	ShowRowStripes    int    `xml:"showRowStripes,attr"`
+	ShowColStripes    int    `xml:"showColStripes,attr"`
+}
+
+// generatePivotTableXML produces the content of xl/pivotTables/pivotTableN.xml.
+func generatePivotTableXML(pt *PivotTable, cacheID int) string {
+	// Parse source range to get column count
+	colCount := rangeColumnCount(pt.SourceRef)
+
+	// Build pivot fields (one per source column)
+	fields := make([]outPivotField, colCount)
+	for i := 0; i < colCount; i++ {
+		fields[i] = outPivotField{
+			Name:    fmt.Sprintf("Field%d", i),
+			ShowAll: 0,
+		}
+	}
+
+	// Mark row/col/data fields with axis
+	for _, rf := range pt.RowFields {
+		for i := range fields {
+			if fields[i].Name == rf {
+				fields[i].Axis = "axisRow"
+			}
+		}
+	}
+	for _, cf := range pt.ColFields {
+		for i := range fields {
+			if fields[i].Name == cf {
+				fields[i].Axis = "axisCol"
+			}
+		}
+	}
+
+	pivotDef := outPivotTableDefinition{
+		Name:        pt.Name,
+		CacheID:     cacheID,
+		DataOnRows:  1,
+		DataCaption: "Values",
+		Location: outPivotLocation{
+			Ref:         pt.Ref,
+			FirstRowCol: 1,
+		},
+		PivotFields: outPivotFields{
+			Count:  len(fields),
+			Fields: fields,
+		},
+		PivotTableStyle: outPivotTableStyleInfo{
+			Name:           "PivotTableStyleLight16",
+			ShowRowHeaders: 1,
+			ShowColHeaders: 1,
+			ShowRowStripes: 1,
+			ShowColStripes: 0,
+		},
+	}
+
+	// Add row fields
+	if len(pt.RowFields) > 0 {
+		rowFieldRefs := make([]outPivotFieldRef, len(pt.RowFields))
+		for i := range pt.RowFields {
+			rowFieldRefs[i] = outPivotFieldRef{X: i}
+		}
+		pivotDef.RowFields = &outPivotRowFields{
+			Count:  len(rowFieldRefs),
+			Fields: rowFieldRefs,
+		}
+	}
+
+	// Add col fields
+	if len(pt.ColFields) > 0 {
+		colFieldRefs := make([]outPivotFieldRef, len(pt.ColFields))
+		for i := range pt.ColFields {
+			colFieldRefs[i] = outPivotFieldRef{X: i}
+		}
+		pivotDef.ColFields = &outPivotColFields{
+			Count:  len(colFieldRefs),
+			Fields: colFieldRefs,
+		}
+	}
+
+	// Add data fields
+	if len(pt.DataFields) > 0 {
+		dataFields := make([]outPivotDataField, len(pt.DataFields))
+		for i, df := range pt.DataFields {
+			dataFields[i] = outPivotDataField{
+				Name:     df.DisplayName,
+				Field:    i,
+				Subtotal: df.Aggregation,
+			}
+		}
+		pivotDef.DataFields = &outPivotDataFields{
+			Count:  len(dataFields),
+			Fields: dataFields,
+		}
+	}
+
+	return marshalXML(pivotDef)
+}
+
+// generatePivotCacheDefinitionXML produces xl/pivotCache/pivotCacheDefinitionN.xml.
+func generatePivotCacheDefinitionXML(pt *PivotTable, cacheID int) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
+	b.WriteString(`<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" r:id="rId1" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` + "\n")
+	b.WriteString(fmt.Sprintf(`  <cacheSource type="worksheet">` + "\n"))
+	b.WriteString(fmt.Sprintf(`    <worksheetSource ref="%s" sheet="%s"/>` + "\n", xmlEscape(pt.SourceRef), xmlEscape(pt.Name)))
+	b.WriteString(`  </cacheSource>` + "\n")
+	b.WriteString(fmt.Sprintf(`  <cacheFields count="%d">` + "\n", rangeColumnCount(pt.SourceRef)))
+	for i := 0; i < rangeColumnCount(pt.SourceRef); i++ {
+		b.WriteString(fmt.Sprintf(`    <cacheField name="Field%d" numFmtId="0">` + "\n", i))
+		b.WriteString(`      <sharedItems/>` + "\n")
+		b.WriteString(`    </cacheField>` + "\n")
+	}
+	b.WriteString(`  </cacheFields>` + "\n")
+	b.WriteString(`</pivotCacheDefinition>` + "\n")
+	return b.String()
+}
+
+// generatePivotCacheRecordsXML produces xl/pivotCache/pivotCacheRecordsN.xml.
+func generatePivotCacheRecordsXML(pt *PivotTable) string {
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` + "\n")
+	b.WriteString(`<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` + "\n")
+	b.WriteString(`</pivotCacheRecords>` + "\n")
+	return b.String()
+}
+
+// generateContentTypesForPivotTables returns <Override> elements for pivot table parts.
+func generateContentTypesForPivotTables(worksheets []*Worksheet) string {
+	var b strings.Builder
+	ptIdx := 0
+	for _, ws := range worksheets {
+		for range ws.PivotTables {
+			ptIdx++
+			fmt.Fprintf(&b, `  <Override PartName="/xl/pivotCache/pivotCacheDefinition%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>`+"\n", ptIdx)
+			fmt.Fprintf(&b, `  <Override PartName="/xl/pivotCache/pivotCacheRecords%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml"/>`+"\n", ptIdx)
+			fmt.Fprintf(&b, `  <Override PartName="/xl/pivotTables/pivotTable%d.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"/>`+"\n", ptIdx)
+		}
+	}
+	return b.String()
 }

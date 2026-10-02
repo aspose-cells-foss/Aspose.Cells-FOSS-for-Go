@@ -58,9 +58,10 @@ type ConditionalFormattingRule struct {
 	Priority int
 
 	// Style is the formatting to apply when the condition is met.
+	// This is used for DXF (Differential Formatting) in conditional formatting.
 	Style *Style
 
-	// StyleID is the internal style index used during save. It is
+	// StyleID is the internal DXF style index used during save. It is
 	// automatically assigned and should not be set manually.
 	StyleID int
 

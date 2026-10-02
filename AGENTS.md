@@ -82,15 +82,15 @@ aspose/cells_foss/              # Library source code (canonical location)
   cell.go / cells.go            # Cell model and A1-keyed collection
   style.go                      # Font, fill, border, alignment, number format
   picture.go                    # Drawing objects
-  chart.go                      # Chart support (bar, line, pie)
+  chart.go                      # Chart support (bar, line, pie) with save/load
   table.go                      # Excel table support
-  pivot_table.go                # Pivot table support
+  pivot_table.go                # Pivot table support with save/load
   datavalidation.go             # Validation models and enums
-  conditional_format.go         # Conditional formatting rules
+  conditional_format.go         # Conditional formatting rules with DXF style support
   macro.go                      # VBA project storage (read/write binary data)
   errors.go                     # Custom error types
   csv_handler.go                # CSV import/export
-  formula_engine.go             # SUM/AVERAGE/MAX/MIN/IF/COUNTIF/VLOOKUP evaluation
+  formula_engine.go             # Formula evaluation (SUM, AVERAGE, ROUND, ABS, IF, COUNTIF, VLOOKUP, etc.)
   streaming_reader.go           # Row-by-row reader for large files with filtering
   crypto.go                     # Encrypted workbooks (Agile Encryption)
   olecfb.go                     # OLE/CFB container for Excel-compatible encryption
@@ -197,6 +197,17 @@ made from misleading descriptions.
   relationships to reconstruct `Picture` objects with position, size, and
   image data. Multi-sheet workbooks use correct per-sheet drawing and media
   part names.
+- **Charts support basic save/load.** Charts can be created, saved to .xlsx files,
+  and loaded back. Supported types: bar, line, pie. Advanced chart types (3D, combo,
+  etc.) are not supported. Chart data is referenced by cell range, not embedded.
+- **Pivot tables support basic save/load.** Pivot tables can be created, saved to
+  .xlsx files, and loaded back with row fields, column fields, and data fields.
+  Advanced features like calculated fields, grouping, and custom aggregations are
+  not supported.
+- **Conditional formatting supports DXF styles.** Conditional formatting rules can
+  include Style objects with font, fill, border, and alignment properties. These
+  are saved as Differential Formatting (DXF) elements in styles.xml and referenced
+  by the conditional formatting rules.
 - **VBA macro support is storage-only.** `Workbook.SetVBAProject` accepts raw
   `vbaProject.bin` binary data and stores it for round-trip preservation. The
   library cannot create, edit, or execute VBA code. Use .xlsm extension when

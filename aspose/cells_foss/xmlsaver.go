@@ -114,6 +114,27 @@ func SaveWorkbook(wb *Workbook, path string) error {
 		return fmt.Errorf("saving workbook: %w", err)
 	}
 
+	// ---- Pivot cache files (before sheets, so cacheID is stable) ----
+	globalPivotIdx := 0
+	for _, ws := range wb.Worksheets {
+		for _, pt := range ws.PivotTables {
+			globalPivotIdx++
+			cacheDefPath := fmt.Sprintf("xl/pivotCache/pivotCacheDefinition%d.xml", globalPivotIdx)
+			cacheDefXML := generatePivotCacheDefinitionXML(pt, globalPivotIdx)
+			if err := writeZipString(zw, cacheDefPath, cacheDefXML); err != nil {
+				zw.Close()
+				return fmt.Errorf("saving workbook: pivot cache definition: %w", err)
+			}
+
+			cacheRecPath := fmt.Sprintf("xl/pivotCache/pivotCacheRecords%d.xml", globalPivotIdx)
+			cacheRecXML := generatePivotCacheRecordsXML(pt)
+			if err := writeZipString(zw, cacheRecPath, cacheRecXML); err != nil {
+				zw.Close()
+				return fmt.Errorf("saving workbook: pivot cache records: %w", err)
+			}
+		}
+	}
+
 	// ---- styles.xml ----
 	hasStyles := len(wb.styles) > 1 || wb.StylesXML != nil
 	if hasStyles {
@@ -166,8 +187,8 @@ func SaveWorkbook(wb *Workbook, path string) error {
 			}
 		}
 
-		// ---- Sheet rels (unified: tables + drawing) ----
-		unifiedRels := generateUnifiedSheetRelsXML(ws.Tables, ws.Pictures, i)
+		// ---- Sheet rels (unified: tables + drawing + charts + pivot tables) ----
+		unifiedRels := generateUnifiedSheetRelsXML(ws.Tables, ws.Pictures, ws.Charts, ws.PivotTables, i)
 		if unifiedRels != "" {
 			relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", i+1)
 			if err := writeZipString(zw, relsPath, unifiedRels); err != nil {
@@ -208,6 +229,26 @@ func SaveWorkbook(wb *Workbook, path string) error {
 					zw.Close()
 					return fmt.Errorf("saving workbook: media: %w", err)
 				}
+			}
+		}
+
+		// ---- Chart XML files ----
+		for cid, chart := range ws.Charts {
+			chartPath := fmt.Sprintf("xl/charts/chart%d.xml", cid+1)
+			chartXML := generateChartXML(chart, ws.Name)
+			if err := writeZipString(zw, chartPath, chartXML); err != nil {
+				zw.Close()
+				return fmt.Errorf("saving workbook: chart: %w", err)
+			}
+		}
+
+		// ---- Pivot table XML files ----
+		for pid, pt := range ws.PivotTables {
+			ptPath := fmt.Sprintf("xl/pivotTables/pivotTable%d.xml", pid+1)
+			ptXML := generatePivotTableXML(pt, pid+1)
+			if err := writeZipString(zw, ptPath, ptXML); err != nil {
+				zw.Close()
+				return fmt.Errorf("saving workbook: pivot table: %w", err)
 			}
 		}
 	}
@@ -278,6 +319,8 @@ func writeOPCScaffolding(zw *zip.Writer, wb *Workbook) error {
 	ct.WriteString(`  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>` + "\n")
 	ct.WriteString(generateContentTypesForTables(wb.Worksheets))
 	ct.WriteString(generateContentTypesForDrawings(wb.Worksheets))
+	ct.WriteString(generateContentTypesForCharts(wb.Worksheets))
+	ct.WriteString(generateContentTypesForPivotTables(wb.Worksheets))
 	ct.WriteString(`</Types>` + "\n")
 
 	if err := writeZipString(zw, "[Content_Types].xml", ct.String()); err != nil {

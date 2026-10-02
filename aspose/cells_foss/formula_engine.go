@@ -21,6 +21,19 @@ import (
 //   - IF(condition, true_val, false_val)
 //   - COUNTIF(range, criteria)
 //   - VLOOKUP(value, range, col_index, [match])
+//   - ROUND(number, decimals)
+//   - ABS(number)
+//   - POWER(base, exponent)
+//   - SQRT(number)
+//   - LEN(text_or_cell)
+//   - LEFT(text_or_cell, num_chars)
+//   - RIGHT(text_or_cell, num_chars)
+//   - MID(text_or_cell, start_num, num_chars)
+//   - UPPER(text_or_cell)
+//   - LOWER(text_or_cell)
+//   - AND(condition1, condition2, ...)
+//   - OR(condition1, condition2, ...)
+//   - NOT(condition)
 //
 // References may be single cells ("A1"), ranges ("A1:A10" / "A1:C1"), or
 // comma-separated combinations of both.  Non-numeric cells are silently
@@ -61,6 +74,32 @@ func CalculateFormula(formula string, ws *Worksheet) (interface{}, error) {
 		return countIfFunc(args, ws)
 	case "VLOOKUP":
 		return vlookupFunc(args, ws)
+	case "ROUND":
+		return roundFunc(args, ws)
+	case "ABS":
+		return absFunc(args, ws)
+	case "POWER":
+		return powerFunc(args, ws)
+	case "SQRT":
+		return sqrtFunc(args, ws)
+	case "LEN":
+		return lenFunc(args, ws)
+	case "LEFT":
+		return leftFunc(args, ws)
+	case "RIGHT":
+		return rightFunc(args, ws)
+	case "MID":
+		return midFunc(args, ws)
+	case "UPPER":
+		return upperFunc(args, ws)
+	case "LOWER":
+		return lowerFunc(args, ws)
+	case "AND":
+		return andFunc(args, ws)
+	case "OR":
+		return orFunc(args, ws)
+	case "NOT":
+		return notFunc(args, ws)
 	}
 
 	// For numeric aggregation functions, expand all references to float64 values.
@@ -711,4 +750,349 @@ func resolveRangeRaw(rng string, ws *Worksheet) ([]*Cell, error) {
 		}
 	}
 	return cells, nil
+}
+
+// ---------------------------------------------------------------------------
+// ROUND function
+// ---------------------------------------------------------------------------
+
+func roundFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("formula: ROUND requires exactly 2 arguments")
+	}
+
+	numVal, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	decVal, err := evaluateValue(strings.TrimSpace(args[1]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	num, ok := toFloat64(numVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: first argument must be numeric")
+	}
+
+	dec, ok := toFloat64(decVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: second argument must be numeric")
+	}
+
+	multiplier := math.Pow(10, dec)
+	return math.Round(num*multiplier) / multiplier, nil
+}
+
+// ---------------------------------------------------------------------------
+// ABS function
+// ---------------------------------------------------------------------------
+
+func absFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: ABS requires exactly 1 argument")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	num, ok := toFloat64(val)
+	if !ok {
+		return nil, fmt.Errorf("formula: argument must be numeric")
+	}
+
+	return math.Abs(num), nil
+}
+
+// ---------------------------------------------------------------------------
+// POWER function
+// ---------------------------------------------------------------------------
+
+func powerFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("formula: POWER requires exactly 2 arguments")
+	}
+
+	baseVal, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	expVal, err := evaluateValue(strings.TrimSpace(args[1]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	base, ok := toFloat64(baseVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: first argument must be numeric")
+	}
+
+	exp, ok := toFloat64(expVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: second argument must be numeric")
+	}
+
+	return math.Pow(base, exp), nil
+}
+
+// ---------------------------------------------------------------------------
+// SQRT function
+// ---------------------------------------------------------------------------
+
+func sqrtFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: SQRT requires exactly 1 argument")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	num, ok := toFloat64(val)
+	if !ok {
+		return nil, fmt.Errorf("formula: argument must be numeric")
+	}
+
+	if num < 0 {
+		return nil, fmt.Errorf("formula: cannot calculate square root of negative number")
+	}
+
+	return math.Sqrt(num), nil
+}
+
+// ---------------------------------------------------------------------------
+// LEN function
+// ---------------------------------------------------------------------------
+
+func lenFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: LEN requires exactly 1 argument")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	text := fmt.Sprintf("%v", val)
+	return float64(len(text)), nil
+}
+
+// ---------------------------------------------------------------------------
+// LEFT function
+// ---------------------------------------------------------------------------
+
+func leftFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("formula: LEFT requires exactly 2 arguments")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	numCharsVal, err := evaluateValue(strings.TrimSpace(args[1]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	text := fmt.Sprintf("%v", val)
+	numChars, ok := toFloat64(numCharsVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: second argument must be numeric")
+	}
+
+	n := int(numChars)
+	if n < 0 {
+		return nil, fmt.Errorf("formula: number of characters cannot be negative")
+	}
+	if n > len(text) {
+		n = len(text)
+	}
+
+	return text[:n], nil
+}
+
+// ---------------------------------------------------------------------------
+// RIGHT function
+// ---------------------------------------------------------------------------
+
+func rightFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("formula: RIGHT requires exactly 2 arguments")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	numCharsVal, err := evaluateValue(strings.TrimSpace(args[1]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	text := fmt.Sprintf("%v", val)
+	numChars, ok := toFloat64(numCharsVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: second argument must be numeric")
+	}
+
+	n := int(numChars)
+	if n < 0 {
+		return nil, fmt.Errorf("formula: number of characters cannot be negative")
+	}
+	if n > len(text) {
+		n = len(text)
+	}
+
+	return text[len(text)-n:], nil
+}
+
+// ---------------------------------------------------------------------------
+// MID function
+// ---------------------------------------------------------------------------
+
+func midFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 3 {
+		return nil, fmt.Errorf("formula: MID requires exactly 3 arguments")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	startVal, err := evaluateValue(strings.TrimSpace(args[1]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	numCharsVal, err := evaluateValue(strings.TrimSpace(args[2]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	text := fmt.Sprintf("%v", val)
+	startPos, ok := toFloat64(startVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: second argument must be numeric")
+	}
+	numChars, ok := toFloat64(numCharsVal)
+	if !ok {
+		return nil, fmt.Errorf("formula: third argument must be numeric")
+	}
+
+	start := int(startPos) - 1 // Convert to 0-based index
+	n := int(numChars)
+
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(text) {
+		return "", nil
+	}
+	if start+n > len(text) {
+		n = len(text) - start
+	}
+
+	return text[start : start+n], nil
+}
+
+// ---------------------------------------------------------------------------
+// UPPER function
+// ---------------------------------------------------------------------------
+
+func upperFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: UPPER requires exactly 1 argument")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	return strings.ToUpper(fmt.Sprintf("%v", val)), nil
+}
+
+// ---------------------------------------------------------------------------
+// LOWER function
+// ---------------------------------------------------------------------------
+
+func lowerFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: LOWER requires exactly 1 argument")
+	}
+
+	val, err := evaluateValue(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+
+	return strings.ToLower(fmt.Sprintf("%v", val)), nil
+}
+
+// ---------------------------------------------------------------------------
+// AND function
+// ---------------------------------------------------------------------------
+
+func andFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("formula: AND requires at least 1 argument")
+	}
+
+	for _, arg := range args {
+		result, err := evaluateCondition(strings.TrimSpace(arg), ws)
+		if err != nil {
+			return nil, fmt.Errorf("formula: %w", err)
+		}
+		if !result {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// ---------------------------------------------------------------------------
+// OR function
+// ---------------------------------------------------------------------------
+
+func orFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) < 1 {
+		return nil, fmt.Errorf("formula: OR requires at least 1 argument")
+	}
+
+	for _, arg := range args {
+		result, err := evaluateCondition(strings.TrimSpace(arg), ws)
+		if err != nil {
+			return nil, fmt.Errorf("formula: %w", err)
+		}
+		if result {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// NOT function
+// ---------------------------------------------------------------------------
+
+func notFunc(args []string, ws *Worksheet) (interface{}, error) {
+	if len(args) != 1 {
+		return nil, fmt.Errorf("formula: NOT requires exactly 1 argument")
+	}
+
+	result, err := evaluateCondition(strings.TrimSpace(args[0]), ws)
+	if err != nil {
+		return nil, fmt.Errorf("formula: %w", err)
+	}
+	return !result, nil
 }
