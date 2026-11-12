@@ -1,5 +1,8 @@
 # Aspose.Cells for Go — Usage Guide
 
+> Applies to release **26.11** (2026-11-12). See [CHANGELOG.md](../CHANGELOG.md) for the
+> release history.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
@@ -137,10 +140,10 @@ cells.Set("B1", 42)          // int
 cells.Set("C1", 3.14)        // float64
 cells.Set("D1", true)        // bool
 
-// Read.
+// Read (Cell.Value is deprecated — use the typed accessors).
 cell, err := cells.Get("A1")
 if err == nil {
-    fmt.Println(cell.Value) // "text"
+    fmt.Println(cell.AsString()) // "text"
 }
 
 // Remove.
@@ -148,7 +151,7 @@ cells.Remove("Z99")
 
 // Iterate all cells.
 for ref, cell := range cells.All() {
-    fmt.Printf("%s = %v\n", ref, cell.Value)
+    fmt.Printf("%s = %s\n", ref, cell.AsString())
 }
 ```
 
