@@ -7,20 +7,24 @@ type ChartType string
 
 // Supported chart types.
 const (
-	ChartTypeBar  ChartType = "bar"
-	ChartTypeLine ChartType = "line"
-	ChartTypePie  ChartType = "pie"
+	ChartTypeBar     ChartType = "bar"
+	ChartTypeLine    ChartType = "line"
+	ChartTypePie     ChartType = "pie"
+	ChartTypeScatter ChartType = "scatter"
+	ChartTypeArea    ChartType = "area"
 )
 
 // Chart represents a chart embedded in a worksheet.
 type Chart struct {
-	// Type is the chart type: "bar", "line", or "pie".
+	// Type is the chart type: "bar", "line", "pie", "scatter", or "area".
 	Type ChartType
 
 	// Title is the chart title displayed above the chart.
 	Title string
 
-	// Series holds the data series to plot.
+	// Series holds the data series to plot. For scatter charts, each
+	// series' Categories range supplies the numeric X values and Values
+	// supplies the Y values.
 	Series []*ChartSeries
 
 	// Anchor specifies the position of the chart on the worksheet.
@@ -34,6 +38,47 @@ type Chart struct {
 
 	// Name is the internal name used in drawing XML.
 	Name string
+
+	// XAxis configures the category axis (scatter: the bottom value
+	// axis). Nil uses Excel defaults. Ignored by pie charts.
+	XAxis *ChartAxis
+
+	// YAxis configures the value axis. Nil uses Excel defaults.
+	// Ignored by pie charts.
+	YAxis *ChartAxis
+
+	// Legend adds a legend to the chart. Nil omits the legend element.
+	Legend *ChartLegend
+}
+
+// ChartAxis configures one axis of a chart.
+type ChartAxis struct {
+	// Title is the axis title; empty omits the title element.
+	Title string
+
+	// Hidden writes <c:delete val="1"/>, suppressing the axis in Excel.
+	Hidden bool
+}
+
+// LegendPosition enumerates where a chart legend is drawn (ST_LegendPos).
+type LegendPosition string
+
+// Supported legend positions.
+const (
+	LegendRight  LegendPosition = "r"
+	LegendLeft   LegendPosition = "l"
+	LegendTop    LegendPosition = "t"
+	LegendBottom LegendPosition = "b"
+)
+
+// ChartLegend configures a chart's legend.
+type ChartLegend struct {
+	// Position is where the legend is drawn; empty means LegendRight.
+	// Unknown values are saved as LegendRight.
+	Position LegendPosition
+
+	// Overlay draws the legend over the plot area instead of beside it.
+	Overlay bool
 }
 
 // ChartSeries represents a single data series in a chart.

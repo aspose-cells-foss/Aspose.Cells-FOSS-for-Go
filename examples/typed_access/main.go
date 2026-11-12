@@ -20,14 +20,14 @@ func main() {
 	c := ws.Cells()
 
 	// Populate cells with different types.
-	c.Set("A1", "Product")     // string
-	c.Set("B1", "Price")      // string
-	c.Set("A2", "Widget")     // string
-	c.Set("B2", float64(12))  // numeric (int-valued float64)
-	c.Set("A3", "Gadget")     // string
-	c.Set("B3", float64(29))  // numeric
-	c.Set("A4", "In stock")   // string
-	c.Set("B4", true)         // boolean
+	c.Set("A1", "Product")   // string
+	c.Set("B1", "Price")     // string
+	c.Set("A2", "Widget")    // string
+	c.Set("B2", float64(12)) // numeric (int-valued float64)
+	c.Set("A3", "Gadget")    // string
+	c.Set("B3", float64(29)) // numeric
+	c.Set("A4", "In stock")  // string
+	c.Set("B4", true)        // boolean
 
 	// Save and reload to demonstrate that loaded numeric cells come back
 	// as float64, not string.

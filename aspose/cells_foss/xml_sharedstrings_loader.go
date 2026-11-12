@@ -40,21 +40,29 @@ type xmlRun struct {
 // It returns an empty slice (and no error) when the file is absent, which is
 // valid for workbooks that use inline values only.
 func loadSharedStrings(zr *zip.Reader) ([]string, error) {
-	raw, err := readZipFile(zr, "xl/sharedStrings.xml")
-	if err != nil {
-		return []string{}, nil
+	_, table, err := loadSharedStringsRaw(zr)
+	return table, err
+}
+
+// loadSharedStringsRaw behaves like loadSharedStrings but additionally
+// returns the raw XML bytes so the saver can write them back verbatim for
+// unmodified workbooks.
+func loadSharedStringsRaw(zr *zip.Reader) (raw []byte, table []string, err error) {
+	raw, rerr := readZipFile(zr, "xl/sharedStrings.xml")
+	if rerr != nil {
+		return nil, []string{}, nil
 	}
 
 	var sst xmlSST
 	if err := xml.Unmarshal(raw, &sst); err != nil {
-		return nil, fmt.Errorf("shared strings: %w", err)
+		return nil, nil, fmt.Errorf("shared strings: %w", err)
 	}
 
 	out := make([]string, len(sst.Items))
 	for i, si := range sst.Items {
 		out[i] = resolveSIText(si)
 	}
-	return out, nil
+	return raw, out, nil
 }
 
 // resolveSIText extracts the plain-text content from a shared string item,

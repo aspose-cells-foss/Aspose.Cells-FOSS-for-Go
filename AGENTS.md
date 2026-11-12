@@ -45,6 +45,8 @@ Key commands:
 go test ./tests/ -v          # library test suite (run from the repo root)
 go test ./...                # includes tests/; examples/ is a separate module
 
+go run ./verify/check_open_xlsx.go <file.xlsx>   # validate .xlsx package structure
+
 cd examples && go run ./basic/      # run a single example
 cd examples && go run ./load_modify_save/   # needs basic/ to have run first
 ```
@@ -78,19 +80,24 @@ cd examples && go run ./load_modify_save/   # needs basic/ to have run first
 doc.go                          # Root package doc (pkg.go.dev indexing only)
 aspose/cells_foss/              # Library source code (canonical location)
   workbook.go                   # Workbook entry point and save/load dispatch
-  worksheet.go                  # Worksheet model
+  worksheet.go                  # Worksheet model and Workbook.AddWorksheet (name validation per Excel rules)
   cell.go / cells.go            # Cell model and A1-keyed collection
   style.go                      # Font, fill, border, alignment, number format
+  number_format.go              # Number format codes (built-in ids + custom <numFmts>) and Excel date serial helpers (1900 date system)
   picture.go                    # Drawing objects
-  chart.go                      # Chart support (bar, line, pie) with save/load
+  chart.go                      # Chart support (bar, line, pie, scatter, area) with axes, legend, and save/load
   table.go                      # Excel table support
   pivot_table.go                # Pivot table support with save/load
-  datavalidation.go             # Validation models and enums
-  conditional_format.go         # Conditional formatting rules with DXF style support
+  layout.go                     # Worksheet layout: merged cells, column widths, row heights, freeze panes, autoFilter
+  rowops.go                     # Worksheet.InsertRow/DeleteRow: shift cells and every range-bearing feature (formulas not rewritten)
+  hyperlink.go                  # Cell hyperlinks (external via relationships, internal via location attribute)
+  datavalidation.go             # Validation models and enums (types + comparison operators, save/load)
+  conditional_format.go         # Conditional formatting: cellIs/text/expression with DXF styles, plus colorScale, dataBar, iconSet, top10
   macro.go                      # VBA project storage (read/write binary data)
   errors.go                     # Custom error types
   csv_handler.go                # CSV import/export
-  formula_engine.go             # Formula evaluation (SUM, AVERAGE, ROUND, ABS, IF, COUNTIF, VLOOKUP, etc.)
+  formula_engine.go             # Formula evaluation: functions (SUM, AVERAGE, ROUND, ABS, IF, COUNTIF, VLOOKUP, etc.), arithmetic expressions (+ - * / ^ & with literals and nested calls), cross-sheet refs (Sheet2!A1, 'My Sheet'!B2:C3)
+  error_value.go                # Excel error values (#DIV/0! etc.) as cell values with Excel-style propagation through formulas
   streaming_reader.go           # Row-by-row reader for large files with filtering
   crypto.go                     # Encrypted workbooks (Agile Encryption)
   olecfb.go                     # OLE/CFB container for Excel-compatible encryption
@@ -197,17 +204,47 @@ made from misleading descriptions.
   relationships to reconstruct `Picture` objects with position, size, and
   image data. Multi-sheet workbooks use correct per-sheet drawing and media
   part names.
-- **Charts support basic save/load.** Charts can be created, saved to .xlsx files,
-  and loaded back. Supported types: bar, line, pie. Advanced chart types (3D, combo,
-  etc.) are not supported. Chart data is referenced by cell range, not embedded.
+- **Charts support save/load with axes and legend.** Charts can be created, saved
+  to .xlsx files, and loaded back. Supported types: bar, line, pie, scatter, area.
+  Cartesian charts write spec-required axis ids plus optional axis titles, hidden
+  axes, and legend position/overlay. Advanced chart types (3D, combo, etc.),
+  secondary axes, data labels, and gridline styling are not supported. Chart data
+  is referenced by cell range, not embedded.
 - **Pivot tables support basic save/load.** Pivot tables can be created, saved to
   .xlsx files, and loaded back with row fields, column fields, and data fields.
   Advanced features like calculated fields, grouping, and custom aggregations are
   not supported.
-- **Conditional formatting supports DXF styles.** Conditional formatting rules can
-  include Style objects with font, fill, border, and alignment properties. These
-  are saved as Differential Formatting (DXF) elements in styles.xml and referenced
-  by the conditional formatting rules.
+- **Conditional formatting supports DXF styles and gradient rules.** Rules can
+  include Style objects with font, fill, border, alignment, and number format
+  properties; these are saved as Differential Formatting (DXF) elements in
+  styles.xml and referenced by the rules. colorScale, dataBar, iconSet, and
+  top10 rule types round-trip through save/load (ranges are addressed with the
+  spec-compliant `sqref` attribute; files written by older versions using `ref`
+  still load). Excel 2010+ extensions (x14 data bar gradients, negative-value
+  formats) are not supported.
+- **Layout covers the visual basics.** Merged cells, column widths, row heights,
+  freeze panes, autoFilter, and cell hyperlinks round-trip through save/load
+  (`layout.go`, `hyperlink.go`). Hidden rows/columns, outline grouping, print
+  setup, and sheet protection are not supported.
+- **Row operations shift references but never formulas.** `InsertRow` /
+  `DeleteRow` (`rowops.go`) move cells, merged ranges, row heights, hyperlinks,
+  autoFilter, data-validation / conditional-formatting / table / pivot ranges,
+  chart data ranges, and picture and chart anchors; features whose whole range
+  vanishes on delete are dropped. Formula text (cell formulas, validation and
+  conditional-format formulas) is not rewritten, comment anchors in preserved
+  parts do not move, and inserting is refused when content would be pushed off
+  the last row (1048576).
+- **Formula error values propagate with limits.** `CalculateFormula` returns
+  Excel error values (`ErrDiv0` etc.) as results, and they propagate through
+  arithmetic, aggregation ranges, and cell references. Comparisons and text
+  functions treat an error operand as its text form instead of propagating,
+  and external-workbook references (`[Book.xlsx]Sheet!A1`) are not supported —
+  sheet-qualified references resolve within the same workbook only.
+- **Number formats use the 1900 date system only.** `Style.NumberFormat` accepts
+  built-in and custom codes and round-trips through save/load. `TimeToSerial` /
+  `SerialToTime` reject serials below 61 (1900-03-01), because Excel's 1900
+  leap-year bug makes that range ambiguous, and reject dates beyond 9999-12-31.
+  The 1904 date system is not supported.
 - **VBA macro support is storage-only.** `Workbook.SetVBAProject` accepts raw
   `vbaProject.bin` binary data and stores it for round-trip preservation. The
   library cannot create, edit, or execute VBA code. Use .xlsm extension when

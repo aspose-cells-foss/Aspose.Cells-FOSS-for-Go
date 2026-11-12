@@ -64,7 +64,10 @@ func (sr *StreamingReader) ProcessRows(sheetName string, callback RowCallback) e
 	defer r.Close()
 
 	// 2. Load shared strings (small — fits in memory even for huge workbooks).
-	sharedStrings, _ := loadSharedStrings(&r.Reader)
+	sharedStrings, err := loadSharedStrings(&r.Reader)
+	if err != nil {
+		return fmt.Errorf("streaming reader: %w", err)
+	}
 
 	// 3. Resolve sheet path.
 	sheetPath, err := resolveStreamSheetPath(&r.Reader, sheetName)
@@ -100,7 +103,10 @@ func (sr *StreamingReader) ProcessRowsWithFilter(sheetName string, opts *StreamO
 	}
 	defer r.Close()
 
-	sharedStrings, _ := loadSharedStrings(&r.Reader)
+	sharedStrings, err := loadSharedStrings(&r.Reader)
+	if err != nil {
+		return fmt.Errorf("streaming reader: %w", err)
+	}
 
 	sheetPath, err := resolveStreamSheetPath(&r.Reader, sheetName)
 	if err != nil {
@@ -154,6 +160,9 @@ func streamSheetRows(r io.Reader, ss []string, callback RowCallback, opts *Strea
 		}
 	}
 
+	// Sequential row counter, used when a <row> has no usable r attribute.
+	seq := 0
+
 	for {
 		tok, err := decoder.Token()
 		if err == io.EOF {
@@ -171,13 +180,20 @@ func streamSheetRows(r io.Reader, ss []string, callback RowCallback, opts *Strea
 			continue
 		}
 
-		// Extract the 1-based row index from the r attribute.
+		// Extract the 1-based row index from the r attribute. Rows without a
+		// usable r attribute fall back to their sequential position.
+		seq++
 		rowIdx := 0
 		for _, attr := range start.Attr {
 			if attr.Name.Local == "r" {
-				rowIdx, _ = strconv.Atoi(attr.Value)
+				if n, err := strconv.Atoi(attr.Value); err == nil && n > 0 {
+					rowIdx = n
+				}
 				break
 			}
+		}
+		if rowIdx == 0 {
+			rowIdx = seq
 		}
 
 		// Apply row range filter.
@@ -269,6 +285,7 @@ func parseStreamCell(decoder *xml.Decoder, cellStart xml.StartElement, ss []stri
 		Ref string `xml:"r,attr"`
 		T   string `xml:"t,attr"`
 		V   string `xml:"v"`
+		Is  *xmlSI `xml:"is"`
 	}
 	if err := decoder.DecodeElement(&cell, &cellStart); err != nil {
 		return "", ""
@@ -300,6 +317,13 @@ func parseStreamCell(decoder *xml.Decoder, cellStart xml.StartElement, ss []stri
 			return cell.Ref, "TRUE"
 		}
 		return cell.Ref, "FALSE"
+	}
+
+	if cell.T == "inlineStr" {
+		if cell.Is != nil {
+			return cell.Ref, resolveSIText(*cell.Is)
+		}
+		return cell.Ref, ""
 	}
 
 	return cell.Ref, cell.V

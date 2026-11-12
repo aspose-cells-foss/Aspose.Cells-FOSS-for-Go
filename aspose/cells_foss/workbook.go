@@ -3,6 +3,7 @@ package cells_foss
 import (
 	"crypto/subtle"
 	"fmt"
+	"io"
 )
 
 // Workbook is the top-level object representing an Excel workbook.
@@ -20,6 +21,36 @@ type Workbook struct {
 	// StylesXML caches the raw bytes of xl/styles.xml from the loaded file.
 	// When the workbook is unmodified this payload is reused verbatim.
 	StylesXML []byte
+
+	// sstRaw caches the raw bytes of xl/sharedStrings.xml as loaded. When
+	// the workbook is unmodified these bytes are written back verbatim.
+	sstRaw []byte
+
+	// sstBase is the shared-string table in its original order. Rebuilds
+	// keep these entries at their original indices so cached worksheet XML
+	// (which references strings by index) remains valid after save.
+	sstBase []string
+
+	// sourceZip caches the raw bytes of the loaded package (decrypted when
+	// the file was encrypted). When nothing has been modified since the
+	// load — or since the last save — these bytes are written back verbatim
+	// so every part, including parts this library does not model (themes,
+	// docProps, comments, calcChain, …), survives byte-for-byte.
+	sourceZip []byte
+
+	// origCT caches the content-type declarations of the package the
+	// workbook was last loaded from or saved to. Parts written back
+	// verbatim reuse their original declarations.
+	origCT *contentTypesCache
+
+	// dxfRaw holds the inner XML of the original <dxfs> block from
+	// styles.xml. Regenerated style sheets keep these entries at their
+	// original indices so conditional-formatting rules loaded from the
+	// file keep valid dxfIds.
+	dxfRaw string
+
+	// dxfBaseCount is the number of <dxf> entries in dxfRaw.
+	dxfBaseCount int
 
 	// styles is the ordered registry of Style records. Index 0 is always the
 	// default cell style.  registerStyle / getStyle manage deduplication.
@@ -112,7 +143,8 @@ func stylesEqual(a, b *Style) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	return fontEqual(a.Font, b.Font) &&
+	return a.NumberFormat == b.NumberFormat &&
+		fontEqual(a.Font, b.Font) &&
 		fillEqual(a.Fill, b.Fill) &&
 		alignmentEqual(a.Alignment, b.Alignment) &&
 		borderEqual(a.Border, b.Border)
@@ -200,4 +232,19 @@ func (wb *Workbook) Save(path string) error {
 		return fmt.Errorf("cells_foss: cannot save a nil Workbook")
 	}
 	return SaveWorkbook(wb, path)
+}
+
+// SaveTo writes the workbook in .xlsx format to w — an HTTP response, a zip
+// entry, a network connection, or any other stream. It behaves exactly like
+// Save (byte-identical round-trip of unmodified packages, password
+// encryption when one is set, cache refresh afterwards) but leaves FilePath
+// unchanged, since the bytes were not written to a file.
+func (wb *Workbook) SaveTo(w io.Writer) error {
+	if wb == nil {
+		return fmt.Errorf("cells_foss: cannot save a nil Workbook")
+	}
+	if w == nil {
+		return fmt.Errorf("cells_foss: cannot save to a nil writer")
+	}
+	return saveWorkbookTo(wb, "", w)
 }

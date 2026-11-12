@@ -83,6 +83,20 @@ func (c *Cell) AsString() string {
 	return CellToString(c.Value)
 }
 
+// markModified flags the owning worksheet and workbook as modified so the
+// saver regenerates this sheet's XML instead of reusing its cached bytes.
+func (c *Cell) markModified() {
+	if c.cells == nil {
+		return
+	}
+	if c.cells.wb != nil {
+		c.cells.wb.Modified = true
+	}
+	if c.cells.ws != nil {
+		c.cells.ws.Modified = true
+	}
+}
+
 // SetStyle assigns the given Style to this cell.  When the owning Workbook is
 // available the style is automatically registered (or deduplicated) and the
 // cell's StyleID is updated.  If the cell has no parent Workbook (e.g. it was
@@ -92,6 +106,7 @@ func (c *Cell) SetStyle(style *Style) error {
 		return fmt.Errorf("cells_foss: cannot set style on a cell that is not part of a Workbook")
 	}
 	c.StyleID = c.cells.wb.registerStyle(style)
+	c.markModified()
 	return nil
 }
 
@@ -105,13 +120,12 @@ func (c *Cell) GetStyle() *Style {
 }
 
 // SetFormula stores a formula expression in this cell and marks the owning
-// Workbook as modified.  The formula is written as-is into the <f> element
-// during save; no parsing or validation is performed at write time.
+// worksheet and workbook as modified.  The formula is written as-is into the
+// <f> element during save; no parsing or validation is performed at write
+// time.
 func (c *Cell) SetFormula(formula string) {
 	c.Formula = formula
-	if c.cells != nil && c.cells.wb != nil {
-		c.cells.wb.Modified = true
-	}
+	c.markModified()
 }
 
 // GetFormula returns the formula expression stored in this cell, or an empty

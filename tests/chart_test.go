@@ -80,6 +80,8 @@ func TestChart_Types(t *testing.T) {
 		cells_foss.ChartTypeBar,
 		cells_foss.ChartTypeLine,
 		cells_foss.ChartTypePie,
+		cells_foss.ChartTypeScatter,
+		cells_foss.ChartTypeArea,
 	}
 
 	for _, ct := range types {
@@ -94,8 +96,8 @@ func TestChart_Types(t *testing.T) {
 		}
 	}
 
-	if len(ws.Charts) != 3 {
-		t.Errorf("len(Charts) = %d, want 3", len(ws.Charts))
+	if len(ws.Charts) != len(types) {
+		t.Errorf("len(Charts) = %d, want %d", len(ws.Charts), len(types))
 	}
 }
 

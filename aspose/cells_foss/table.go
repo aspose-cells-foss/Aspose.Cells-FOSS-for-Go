@@ -37,16 +37,39 @@ func NewTable(name, rangeRef string) *Table {
 
 // AddTable creates a new Table covering the given range, assigns it a unique
 // auto-generated name ("Table1", "Table2", …), appends it to the worksheet,
-// and returns it for further configuration.
+// and returns it for further configuration. Table names must be unique
+// across the whole workbook, so numbering skips names already used on other
+// sheets.
 func (ws *Worksheet) AddTable(rangeRef string) *Table {
-	name := fmt.Sprintf("Table%d", len(ws.Tables)+1)
-	t := NewTable(name, rangeRef)
+	t := NewTable(ws.nextTableName(), rangeRef)
 	ws.Tables = append(ws.Tables, t)
 	ws.Modified = true
 	if ws.cells != nil && ws.cells.wb != nil {
 		ws.cells.wb.Modified = true
 	}
 	return t
+}
+
+// nextTableName returns the first "TableN" name not already used by any
+// table in the workbook. Excel requires table names to be unique workbook-
+// wide, so per-sheet numbering would collide in multi-sheet workbooks.
+func (ws *Worksheet) nextTableName() string {
+	used := make(map[string]bool)
+	sheets := []*Worksheet{ws}
+	if ws.cells != nil && ws.cells.wb != nil {
+		sheets = ws.cells.wb.Worksheets
+	}
+	for _, s := range sheets {
+		for _, t := range s.Tables {
+			used[t.Name] = true
+		}
+	}
+	for n := 1; ; n++ {
+		name := fmt.Sprintf("Table%d", n)
+		if !used[name] {
+			return name
+		}
+	}
 }
 
 // GetTable returns the Table with the given name, or nil when no match is found.

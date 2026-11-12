@@ -15,6 +15,34 @@ const (
 	DataValidationTypeCustom     = "custom"
 )
 
+// DataValidationOperator enumerates the comparison operators for
+// value-comparing validation types (whole, decimal, date, time, textLength).
+// The string values match the OOXML ST_DataValidationOperator names. The
+// empty string means "between" — the schema default, which Excel omits from
+// the file.
+const (
+	DataValidationOpBetween            = "between"
+	DataValidationOpNotBetween         = "notBetween"
+	DataValidationOpEqual              = "equal"
+	DataValidationOpNotEqual           = "notEqual"
+	DataValidationOpLessThan           = "lessThan"
+	DataValidationOpLessThanOrEqual    = "lessThanOrEqual"
+	DataValidationOpGreaterThan        = "greaterThan"
+	DataValidationOpGreaterThanOrEqual = "greaterThanOrEqual"
+)
+
+// validDataValidationOperators is the operator set AddDataValidation accepts.
+var validDataValidationOperators = map[string]bool{
+	DataValidationOpBetween:            true,
+	DataValidationOpNotBetween:         true,
+	DataValidationOpEqual:              true,
+	DataValidationOpNotEqual:           true,
+	DataValidationOpLessThan:           true,
+	DataValidationOpLessThanOrEqual:    true,
+	DataValidationOpGreaterThan:        true,
+	DataValidationOpGreaterThanOrEqual: true,
+}
+
 // Error style constants for data validation alerts.
 const (
 	ErrorStyleStop        = "stop"
@@ -27,6 +55,12 @@ const (
 type DataValidation struct {
 	// Type is the validation type (e.g. "list", "whole", "decimal").
 	Type string
+
+	// Operator is the comparison applied by value-comparing types (whole,
+	// decimal, date, time, textLength): one of the DataValidationOp*
+	// constants. Empty means "between" (the schema default). Ignored by
+	// list and custom validations.
+	Operator string
 
 	// Ref is the A1-style range (or space-separated list of ranges) this
 	// validation rule applies to, e.g. "A1:A10".
@@ -72,6 +106,9 @@ func (ws *Worksheet) AddDataValidation(ref string, dv *DataValidation) error {
 	}
 	if ref == "" {
 		return fmt.Errorf("cells_foss: DataValidation ref is empty")
+	}
+	if dv.Operator != "" && !validDataValidationOperators[dv.Operator] {
+		return fmt.Errorf("cells_foss: invalid DataValidation operator %q", dv.Operator)
 	}
 	dv.Ref = ref
 	ws.DataValidations = append(ws.DataValidations, dv)

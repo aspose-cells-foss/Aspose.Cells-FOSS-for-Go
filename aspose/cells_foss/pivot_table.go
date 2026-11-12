@@ -77,7 +77,7 @@ func (ws *Worksheet) AddPivotTable(pt *PivotTable) error {
 	}
 
 	if pt.Name == "" {
-		pt.Name = fmt.Sprintf("PivotTable %d", len(ws.PivotTables)+1)
+		pt.Name = ws.nextPivotTableName()
 	}
 
 	ws.PivotTables = append(ws.PivotTables, pt)
@@ -86,6 +86,28 @@ func (ws *Worksheet) AddPivotTable(pt *PivotTable) error {
 		ws.cells.wb.Modified = true
 	}
 	return nil
+}
+
+// nextPivotTableName returns the first auto-generated pivot table name not
+// already used in the workbook. Pivot table names must be unique workbook-
+// wide, so per-sheet numbering would collide in multi-sheet workbooks.
+func (ws *Worksheet) nextPivotTableName() string {
+	used := make(map[string]bool)
+	sheets := []*Worksheet{ws}
+	if ws.cells != nil && ws.cells.wb != nil {
+		sheets = ws.cells.wb.Worksheets
+	}
+	for _, s := range sheets {
+		for _, pt := range s.PivotTables {
+			used[pt.Name] = true
+		}
+	}
+	for n := 1; ; n++ {
+		name := fmt.Sprintf("PivotTable %d", n)
+		if !used[name] {
+			return name
+		}
+	}
 }
 
 // RemovePivotTable removes the pivot table with the given name.

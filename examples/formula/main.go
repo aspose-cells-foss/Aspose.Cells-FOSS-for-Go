@@ -73,11 +73,43 @@ func main() {
 		}
 	}
 
+	// ---- Cross-sheet references ----
+	summary, err := wb.AddWorksheet("Summary")
+	if err != nil {
+		fmt.Printf("AddWorksheet: %v\n", err)
+		return
+	}
+	summary.Cells().Set("A1", "TOTAL (from Sheet1)")
+	summary.Cells().Set("B1", nil)
+	crossCell, _ := summary.Cells().Get("B1")
+	crossCell.SetFormula("SUM(Sheet1!B2:B6)")
+	crossResult, err := cells_foss.CalculateFormula(crossCell.GetFormula(), summary)
+	if err != nil {
+		fmt.Printf("  cross-sheet: %v\n", err)
+	} else {
+		fmt.Printf("  %s = %v (cross-sheet)\n", crossCell.GetFormula(), crossResult)
+	}
+
+	// ---- Error values follow Excel semantics ----
+	// Division by zero yields the #DIV/0! error value, not a failure, and
+	// error values can be stored in cells like any other value.
+	divResult, err := cells_foss.CalculateFormula("1/0", ws)
+	fmt.Printf("  1/0 = %v (error value, err=%v)\n", divResult, err)
+	ws.Cells().Set("A11", "DIV ERROR")
+	ws.Cells().Set("B11", divResult)
+
 	outPath := "outputfiles/formula.xlsx"
 	if err := wb.Save(outPath); err != nil {
 		fmt.Printf("\nError saving: %v\n", err)
 		return
 	}
 	fmt.Printf("\nWorkbook saved to %s\n", outPath)
+
+	// Error values round-trip: they are stored as t="e" cells.
+	if loaded, err := cells_foss.LoadWorkbook(outPath); err == nil {
+		if c, err := loaded.Worksheets[0].Cells().Get("B11"); err == nil {
+			fmt.Printf("Reloaded B11: %v (%T)\n", c.Value, c.Value)
+		}
+	}
 	fmt.Println("Open in Excel — formulas will auto-calculate.")
 }

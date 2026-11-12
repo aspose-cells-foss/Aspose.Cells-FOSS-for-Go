@@ -2,6 +2,7 @@ package cells_foss
 
 import (
 	"archive/zip"
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"path"
@@ -15,11 +16,22 @@ import (
 
 type xmlStyleSheet struct {
 	XMLName      xml.Name   `xml:"styleSheet"`
+	NumFmts      xmlNumFmts `xml:"numFmts"`
 	Fonts        xmlFonts   `xml:"fonts"`
 	Fills        xmlFills   `xml:"fills"`
 	Borders      xmlBorders `xml:"borders"`
 	CellStyleXfs xmlXfs     `xml:"cellStyleXfs"`
 	CellXfs      xmlXfs     `xml:"cellXfs"`
+}
+
+type xmlNumFmts struct {
+	Count   int         `xml:"count,attr"`
+	NumFmts []xmlNumFmt `xml:"numFmt"`
+}
+
+type xmlNumFmt struct {
+	NumFmtId   int    `xml:"numFmtId,attr"`
+	FormatCode string `xml:"formatCode,attr"`
 }
 
 type xmlFonts struct {
@@ -200,10 +212,24 @@ func loadStyles(zr *zip.Reader, wb *Workbook) ([]byte, error) {
 	fills := parseFills(ss.Fills.Fills)
 	borders := parseBorders(ss.Borders.Borders)
 
+	// numFmtId -> format code. The file's own <numFmts> entries override
+	// the standard built-in ids; built-ins cover ids the file does not
+	// declare explicitly.
+	numFmtCodes := make(map[int]string, len(builtinNumFmtCodes)+len(ss.NumFmts.NumFmts))
+	for id, code := range builtinNumFmtCodes {
+		numFmtCodes[id] = code
+	}
+	for _, nf := range ss.NumFmts.NumFmts {
+		numFmtCodes[nf.NumFmtId] = nf.FormatCode
+	}
+
 	styles := make([]*Style, 0, len(ss.CellXfs.Xfs))
 	for _, xf := range ss.CellXfs.Xfs {
 		st := DefaultStyle()
 
+		if code := numFmtCodes[xf.NumFmtId]; code != "" && !strings.EqualFold(code, NumFmtGeneral) {
+			st.NumberFormat = code
+		}
 		if xf.FontId >= 0 && xf.FontId < len(fonts) {
 			st.Font = fonts[xf.FontId]
 		}
@@ -229,7 +255,38 @@ func loadStyles(zr *zip.Reader, wb *Workbook) ([]byte, error) {
 	}
 	wb.styles = styles
 
+	// Cache the original <dxfs> block verbatim. When styles.xml has to be
+	// regenerated these entries are kept at their original indices so
+	// dxfIds in cached sheet XML and in loaded conditional-formatting
+	// rules stay valid.
+	cacheDxfBlock(wb, raw)
+
 	return raw, nil
+}
+
+// cacheDxfBlock extracts the inner XML of the <dxfs> block from a styles
+// part and caches it on the workbook as the baseline for future style-sheet
+// regeneration. A styles part without dxfs clears the baseline.
+func cacheDxfBlock(wb *Workbook, stylesXML []byte) {
+	wb.dxfRaw = ""
+	wb.dxfBaseCount = 0
+
+	start := bytes.Index(stylesXML, []byte("<dxfs"))
+	if start < 0 {
+		return
+	}
+	gt := bytes.IndexByte(stylesXML[start:], '>')
+	if gt < 0 {
+		return
+	}
+	inner := start + gt + 1
+	end := bytes.Index(stylesXML[inner:], []byte("</dxfs>"))
+	if end < 0 {
+		return
+	}
+	block := string(stylesXML[inner : inner+end])
+	wb.dxfRaw = block
+	wb.dxfBaseCount = strings.Count(block, "<dxf")
 }
 
 // ======================================================================
@@ -301,9 +358,33 @@ type xmlDrawingWS struct {
 }
 
 type xmlAnchor struct {
-	From xmlPos `xml:"from"`
-	To   xmlPos `xml:"to"`
-	Pic  xmlPic `xml:"pic"`
+	From         xmlPos           `xml:"from"`
+	To           xmlPos           `xml:"to"`
+	Pic          xmlPic           `xml:"pic"`
+	GraphicFrame *xmlGraphicFrame `xml:"graphicFrame"`
+}
+
+// xmlGraphicFrame parses the drawing-level chart reference
+// (CT_GraphicalObjectFrame) including its transform for size restoration.
+type xmlGraphicFrame struct {
+	Xfrm    xmlGFXfrm    `xml:"xfrm"`
+	Graphic xmlGraphicEl `xml:"http://schemas.openxmlformats.org/drawingml/2006/main graphic"`
+}
+
+type xmlGFXfrm struct {
+	Ext xmlExtent `xml:"http://schemas.openxmlformats.org/drawingml/2006/main ext"`
+}
+
+type xmlGraphicEl struct {
+	GraphicData xmlGraphicDataEl `xml:"http://schemas.openxmlformats.org/drawingml/2006/main graphicData"`
+}
+
+type xmlGraphicDataEl struct {
+	Chart xmlChartRefEl `xml:"http://schemas.openxmlformats.org/drawingml/2006/chart chart"`
+}
+
+type xmlChartRefEl struct {
+	RID string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships id,attr"`
 }
 
 type xmlPos struct {
@@ -341,13 +422,36 @@ type xmlSpPr struct {
 }
 
 type xmlXfrm struct {
-	Off xmlPoint `xml:"off"`
-	Ext xmlPoint `xml:"ext"`
+	Off xmlPoint  `xml:"off"`
+	Ext xmlExtent `xml:"ext"`
 }
 
 type xmlPoint struct {
 	X int64 `xml:"x,attr"`
 	Y int64 `xml:"y,attr"`
+}
+
+// xmlExtent parses a:ext. Spec-compliant files use cx/cy attributes; files
+// produced by older versions of this library used x/y. Accept both.
+type xmlExtent struct {
+	CX int64 `xml:"cx,attr"`
+	CY int64 `xml:"cy,attr"`
+	X  int64 `xml:"x,attr"`
+	Y  int64 `xml:"y,attr"`
+}
+
+func (e xmlExtent) width() int64 {
+	if e.CX != 0 {
+		return e.CX
+	}
+	return e.X
+}
+
+func (e xmlExtent) height() int64 {
+	if e.CY != 0 {
+		return e.CY
+	}
+	return e.Y
 }
 
 // loadDrawings reads the drawing XML and relationships for the given sheet
@@ -439,8 +543,8 @@ func loadDrawings(zr *zip.Reader, sheetIndex int) ([]*Picture, error) {
 		}
 
 		// Calculate width/height from EMUs.
-		width := int(anchor.Pic.SpPr.Xfrm.Ext.X / emuPerPixel)
-		height := int(anchor.Pic.SpPr.Xfrm.Ext.Y / emuPerPixel)
+		width := int(anchor.Pic.SpPr.Xfrm.Ext.width() / emuPerPixel)
+		height := int(anchor.Pic.SpPr.Xfrm.Ext.height() / emuPerPixel)
 
 		pic := &Picture{
 			Data:   imageData,
@@ -464,19 +568,65 @@ func loadDrawings(zr *zip.Reader, sheetIndex int) ([]*Picture, error) {
 // ======================================================================
 
 type xmlConditionalFormatting struct {
+	// Excel writes sqref; files from older library versions wrote ref.
+	Sqref string      `xml:"sqref,attr"`
 	Ref   string      `xml:"ref,attr"`
 	Rules []xmlCFRule `xml:"cfRule"`
+}
+
+func (x xmlConditionalFormatting) rangeRef() string {
+	if x.Sqref != "" {
+		return x.Sqref
+	}
+	return x.Ref
 }
 
 type xmlCFRule struct {
 	Type       string `xml:"type,attr"`
 	Operator   string `xml:"operator,attr,omitempty"`
 	Priority   int    `xml:"priority,attr"`
-	Formula    string `xml:"formula,omitempty"`
-	Formula2   string `xml:"formula2,omitempty"`
+	Rank       int    `xml:"rank,attr"`
+	Bottom     int    `xml:"bottom,attr"`
+	Percent    int    `xml:"percent,attr"`
 	Text       string `xml:"text,attr,omitempty"`
 	StopIfTrue int    `xml:"stopIfTrue,attr,omitempty"`
-	DxfID      int    `xml:"dxfId,attr,omitempty"`
+	// DxfID is a pointer so a literal dxfId="0" is distinguishable from a
+	// missing attribute.
+	DxfID      *int           `xml:"dxfId,attr"`
+	Formula    string         `xml:"formula,omitempty"`
+	Formula2   string         `xml:"formula2,omitempty"`
+	ColorScale *xmlColorScale `xml:"colorScale"`
+	DataBar    *xmlDataBar    `xml:"dataBar"`
+	IconSet    *xmlIconSet    `xml:"iconSet"`
+}
+
+type xmlColorScale struct {
+	Cfvo   []xmlCfvo    `xml:"cfvo"`
+	Colors []xmlCFColor `xml:"color"`
+}
+
+type xmlDataBar struct {
+	MinLength int        `xml:"minLength,attr"`
+	MaxLength int        `xml:"maxLength,attr"`
+	ShowValue *int       `xml:"showValue,attr"`
+	Cfvo      []xmlCfvo  `xml:"cfvo"`
+	Color     xmlCFColor `xml:"color"`
+}
+
+type xmlIconSet struct {
+	IconSet   string    `xml:"iconSet,attr"`
+	ShowValue *int      `xml:"showValue,attr"`
+	Reverse   int       `xml:"reverse,attr"`
+	Cfvo      []xmlCfvo `xml:"cfvo"`
+}
+
+type xmlCfvo struct {
+	Type string `xml:"type,attr"`
+	Val  string `xml:"val,attr"`
+}
+
+type xmlCFColor struct {
+	RGB string `xml:"rgb,attr"`
 }
 
 // loadConditionalFormattings reads the conditional formatting rules for the
@@ -492,7 +642,7 @@ func loadConditionalFormattings(ws *Worksheet, rawXML []byte) error {
 
 	for _, xcf := range sheet.ConditionalFormattings {
 		cf := &ConditionalFormatting{
-			Ref: xcf.Ref,
+			Ref: xcf.rangeRef(),
 		}
 		for _, xrule := range xcf.Rules {
 			rule := &ConditionalFormattingRule{
@@ -503,7 +653,48 @@ func loadConditionalFormattings(ws *Worksheet, rawXML []byte) error {
 				Formula2:   xrule.Formula2,
 				Text:       xrule.Text,
 				StopIfTrue: xrule.StopIfTrue != 0,
-				StyleID:    xrule.DxfID,
+				Rank:       xrule.Rank,
+				Bottom:     xrule.Bottom != 0,
+				Percent:    xrule.Percent != 0,
+			}
+			if xrule.DxfID != nil {
+				rule.StyleID = *xrule.DxfID
+				rule.hasDxfID = true
+			}
+			if xrule.ColorScale != nil {
+				cs := &ColorScale{}
+				for _, c := range xrule.ColorScale.Cfvo {
+					cs.Thresholds = append(cs.Thresholds, CondThreshold{Type: c.Type, Val: c.Val})
+				}
+				for _, c := range xrule.ColorScale.Colors {
+					cs.Colors = append(cs.Colors, c.RGB)
+				}
+				rule.ColorScale = cs
+			}
+			if xrule.DataBar != nil && len(xrule.DataBar.Cfvo) >= 2 {
+				db := &DataBar{
+					Min:       CondThreshold{Type: xrule.DataBar.Cfvo[0].Type, Val: xrule.DataBar.Cfvo[0].Val},
+					Max:       CondThreshold{Type: xrule.DataBar.Cfvo[1].Type, Val: xrule.DataBar.Cfvo[1].Val},
+					Color:     xrule.DataBar.Color.RGB,
+					MinLength: xrule.DataBar.MinLength,
+					MaxLength: xrule.DataBar.MaxLength,
+					HideValue: xrule.DataBar.ShowValue != nil && *xrule.DataBar.ShowValue == 0,
+				}
+				rule.DataBar = db
+			}
+			if xrule.IconSet != nil {
+				is := &IconSet{
+					IconSet:   xrule.IconSet.IconSet,
+					HideValue: xrule.IconSet.ShowValue != nil && *xrule.IconSet.ShowValue == 0,
+					Reverse:   xrule.IconSet.Reverse != 0,
+				}
+				if is.IconSet == "" {
+					is.IconSet = "3TrafficLights1" // schema default
+				}
+				for _, c := range xrule.IconSet.Cfvo {
+					is.Thresholds = append(is.Thresholds, CondThreshold{Type: c.Type, Val: c.Val})
+				}
+				rule.IconSet = is
 			}
 			cf.Rules = append(cf.Rules, rule)
 		}
@@ -517,13 +708,36 @@ func loadConditionalFormattings(ws *Worksheet, rawXML []byte) error {
 // ======================================================================
 
 type xmlChartSpace struct {
-	XMLName xml.Name  `xml:"http://schemas.openxmlformats.org/drawingml/2006/chart chartSpace"`
-	Chart   xmlChart  `xml:"chart"`
+	XMLName xml.Name `xml:"http://schemas.openxmlformats.org/drawingml/2006/chart chartSpace"`
+	Chart   xmlChart `xml:"chart"`
 }
 
 type xmlChart struct {
 	Title    *xmlChartTitle `xml:"title,omitempty"`
 	PlotArea xmlPlotArea    `xml:"plotArea"`
+	Legend   *xmlLegend     `xml:"legend,omitempty"`
+}
+
+// xmlLegend decodes CT_Legend; only position and overlay are recovered.
+type xmlLegend struct {
+	Pos     *xmlChartStrAttr  `xml:"legendPos,omitempty"`
+	Overlay *xmlChartBoolAttr `xml:"overlay,omitempty"`
+}
+
+// xmlChartAxis decodes CT_CatAx/CT_ValAx; only the fields the model carries
+// are recovered.
+type xmlChartAxis struct {
+	Delete *xmlChartBoolAttr `xml:"delete,omitempty"`
+	AxPos  *xmlChartStrAttr  `xml:"axPos,omitempty"`
+	Title  *xmlChartTitle    `xml:"title,omitempty"`
+}
+
+type xmlChartStrAttr struct {
+	Val string `xml:"val,attr"`
+}
+
+type xmlChartBoolAttr struct {
+	Val bool `xml:"val,attr"`
 }
 
 type xmlChartTitle struct {
@@ -547,9 +761,13 @@ type xmlChartR struct {
 }
 
 type xmlPlotArea struct {
-	BarChart  *xmlBarChart  `xml:"barChart,omitempty"`
-	LineChart *xmlLineChart `xml:"lineChart,omitempty"`
-	PieChart  *xmlPieChart  `xml:"pieChart,omitempty"`
+	BarChart     *xmlBarChart     `xml:"barChart,omitempty"`
+	LineChart    *xmlLineChart    `xml:"lineChart,omitempty"`
+	PieChart     *xmlPieChart     `xml:"pieChart,omitempty"`
+	ScatterChart *xmlScatterChart `xml:"scatterChart,omitempty"`
+	AreaChart    *xmlAreaChart    `xml:"areaChart,omitempty"`
+	CatAx        []xmlChartAxis   `xml:"catAx"`
+	ValAx        []xmlChartAxis   `xml:"valAx"`
 }
 
 type xmlBarChart struct {
@@ -564,14 +782,33 @@ type xmlPieChart struct {
 	Series []xmlChartSeries `xml:"ser"`
 }
 
-type xmlChartSeries struct {
-	Tx   xmlChartSeriesTx  `xml:"tx,omitempty"`
-	Cat  xmlChartSeriesRef `xml:"cat,omitempty"`
-	Val  xmlChartSeriesRef `xml:"val,omitempty"`
+type xmlAreaChart struct {
+	Series []xmlChartSeries `xml:"ser"`
 }
 
+// xmlScatterChart decodes CT_ScatterChart; scatter series reference their
+// data through xVal/yVal instead of cat/val.
+type xmlScatterChart struct {
+	Series []xmlScatterSeries `xml:"ser"`
+}
+
+type xmlScatterSeries struct {
+	Tx   xmlChartSeriesTx  `xml:"tx,omitempty"`
+	XVal xmlChartSeriesRef `xml:"xVal,omitempty"`
+	YVal xmlChartSeriesRef `xml:"yVal,omitempty"`
+}
+
+type xmlChartSeries struct {
+	Tx  xmlChartSeriesTx  `xml:"tx,omitempty"`
+	Cat xmlChartSeriesRef `xml:"cat,omitempty"`
+	Val xmlChartSeriesRef `xml:"val,omitempty"`
+}
+
+// xmlChartSeriesTx decodes CT_SerTx: a literal name in c:v, or a cell
+// reference in c:strRef.
 type xmlChartSeriesTx struct {
 	StrRef xmlChartStrRef `xml:"strRef"`
+	V      string         `xml:"v"`
 }
 
 type xmlChartSeriesRef struct {
@@ -587,9 +824,24 @@ type xmlChartNumRef struct {
 	F string `xml:"f"`
 }
 
+// chartRef is a discovered chart part plus the placement recovered from its
+// drawing graphicFrame, when available.
+type chartRef struct {
+	path   string
+	anchor *ChartAnchor
+	width  int
+	height int
+}
+
 // loadCharts reads the chart definitions for the given sheet index.
+//
+// Spec-compliant packages reference charts from the sheet's drawing part
+// through a graphicFrame; files written by older versions of this library
+// referenced them directly from the sheet rels. Both layouts are accepted.
+// Charts reached through a drawing also recover their anchor and size from
+// the graphicFrame.
 func loadCharts(zr *zip.Reader, sheetIndex int) ([]*Chart, error) {
-	// 1. Find the chart relationships in sheet rels.
+	// 1. Find the chart relationships reachable from the sheet.
 	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
 	relsRaw, err := readZipFile(zr, relsPath)
 	if err != nil {
@@ -601,20 +853,38 @@ func loadCharts(zr *zip.Reader, sheetIndex int) ([]*Chart, error) {
 		return nil, fmt.Errorf("cannot parse %s: %w", relsPath, err)
 	}
 
-	var charts []*Chart
+	var refs []chartRef
+	seen := make(map[string]bool)
+
+	// Direct sheet-rels references (legacy layout written by this library).
 	for _, rel := range rels.Rels {
-		if !strings.Contains(rel.Target, "charts/") {
+		if rel.TargetMode == "External" || !strings.Contains(rel.Target, "charts/") {
 			continue
 		}
+		cp := path.Clean(path.Join("xl/worksheets", rel.Target))
+		if !seen[cp] {
+			seen[cp] = true
+			refs = append(refs, chartRef{path: cp})
+		}
+	}
 
-		// Resolve chart path
-		chartPath := path.Clean(path.Join("xl/worksheets", rel.Target))
-		raw, err := readZipFile(zr, chartPath)
+	// Drawing-mediated references (spec layout).
+	for _, rel := range rels.Rels {
+		if rel.TargetMode == "External" || !strings.Contains(rel.Target, "drawings/") {
+			continue
+		}
+		drawingPath := path.Clean(path.Join("xl/worksheets", rel.Target))
+		refs = append(refs, loadDrawingChartRefs(zr, drawingPath, seen)...)
+	}
+
+	// 2. Parse each chart part.
+	var charts []*Chart
+	for _, ref := range refs {
+		raw, err := readZipFile(zr, ref.path)
 		if err != nil {
 			continue
 		}
 
-		// Parse chart XML
 		var chartSpace xmlChartSpace
 		if err := xml.Unmarshal(raw, &chartSpace); err != nil {
 			continue
@@ -624,33 +894,62 @@ func loadCharts(zr *zip.Reader, sheetIndex int) ([]*Chart, error) {
 			Width:  400, // Default width
 			Height: 300, // Default height
 		}
-
-		// Extract title
-		if chartSpace.Chart.Title != nil {
-			for _, r := range chartSpace.Chart.Title.Tx.Rich.P.R {
-				chart.Title += r.T
+		if ref.anchor != nil {
+			chart.Anchor = *ref.anchor
+			if ref.width > 0 {
+				chart.Width = ref.width
+			}
+			if ref.height > 0 {
+				chart.Height = ref.height
 			}
 		}
 
+		// Extract title
+		chart.Title = chartTitleText(chartSpace.Chart.Title)
+
 		// Determine chart type and extract series
-		if chartSpace.Chart.PlotArea.BarChart != nil {
+		pa := &chartSpace.Chart.PlotArea
+		switch {
+		case pa.BarChart != nil:
 			chart.Type = ChartTypeBar
-			for _, ser := range chartSpace.Chart.PlotArea.BarChart.Series {
-				series := extractChartSeries(ser)
-				chart.Series = append(chart.Series, series)
+			for _, ser := range pa.BarChart.Series {
+				chart.Series = append(chart.Series, extractChartSeries(ser))
 			}
-		} else if chartSpace.Chart.PlotArea.LineChart != nil {
+		case pa.LineChart != nil:
 			chart.Type = ChartTypeLine
-			for _, ser := range chartSpace.Chart.PlotArea.LineChart.Series {
-				series := extractChartSeries(ser)
-				chart.Series = append(chart.Series, series)
+			for _, ser := range pa.LineChart.Series {
+				chart.Series = append(chart.Series, extractChartSeries(ser))
 			}
-		} else if chartSpace.Chart.PlotArea.PieChart != nil {
+		case pa.AreaChart != nil:
+			chart.Type = ChartTypeArea
+			for _, ser := range pa.AreaChart.Series {
+				chart.Series = append(chart.Series, extractChartSeries(ser))
+			}
+		case pa.ScatterChart != nil:
+			chart.Type = ChartTypeScatter
+			for _, ser := range pa.ScatterChart.Series {
+				chart.Series = append(chart.Series, extractScatterSeries(ser))
+			}
+		case pa.PieChart != nil:
 			chart.Type = ChartTypePie
-			if len(chartSpace.Chart.PlotArea.PieChart.Series) > 0 {
-				series := extractChartSeries(chartSpace.Chart.PlotArea.PieChart.Series[0])
-				chart.Series = append(chart.Series, series)
+			if len(pa.PieChart.Series) > 0 {
+				chart.Series = append(chart.Series, extractChartSeries(pa.PieChart.Series[0]))
 			}
+		}
+
+		chart.XAxis, chart.YAxis = extractChartAxes(pa, chart.Type)
+		if l := chartSpace.Chart.Legend; l != nil {
+			legend := &ChartLegend{Position: LegendRight}
+			if l.Pos != nil {
+				switch LegendPosition(l.Pos.Val) {
+				case LegendRight, LegendLeft, LegendTop, LegendBottom:
+					legend.Position = LegendPosition(l.Pos.Val)
+				}
+			}
+			if l.Overlay != nil {
+				legend.Overlay = l.Overlay.Val
+			}
+			chart.Legend = legend
 		}
 
 		charts = append(charts, chart)
@@ -659,14 +958,67 @@ func loadCharts(zr *zip.Reader, sheetIndex int) ([]*Chart, error) {
 	return charts, nil
 }
 
+// loadDrawingChartRefs collects the charts referenced by one drawing part,
+// recovering each chart's placement from its graphicFrame anchor. Paths
+// already in seen are skipped and new ones are added to it.
+func loadDrawingChartRefs(zr *zip.Reader, drawingPath string, seen map[string]bool) []chartRef {
+	drawingRelsRaw, err := readZipFile(zr, relsPathFor(drawingPath))
+	if err != nil {
+		return nil
+	}
+	var drels xmlRelationships
+	if err := xml.Unmarshal(drawingRelsRaw, &drels); err != nil {
+		return nil
+	}
+	chartPathByRID := make(map[string]string)
+	for _, drel := range drels.Rels {
+		if drel.TargetMode == "External" || !strings.Contains(drel.Target, "charts/") {
+			continue
+		}
+		chartPathByRID[drel.ID] = resolvePartPath(drawingPath, drel.Target)
+	}
+	if len(chartPathByRID) == 0 {
+		return nil
+	}
+
+	drawingRaw, err := readZipFile(zr, drawingPath)
+	if err != nil {
+		return nil
+	}
+	var drawing xmlDrawingWS
+	if err := xml.Unmarshal(drawingRaw, &drawing); err != nil {
+		return nil
+	}
+
+	var refs []chartRef
+	for _, anchor := range append(drawing.Anchors, drawing.Anchors2...) {
+		gf := anchor.GraphicFrame
+		if gf == nil {
+			continue
+		}
+		cp := chartPathByRID[gf.Graphic.GraphicData.Chart.RID]
+		if cp == "" || seen[cp] {
+			continue
+		}
+		seen[cp] = true
+		refs = append(refs, chartRef{
+			path: cp,
+			anchor: &ChartAnchor{
+				Row:    anchor.From.Row,
+				Col:    anchor.From.Col,
+				RowOff: anchor.From.RowOff,
+				ColOff: anchor.From.ColOff,
+			},
+			width:  int(gf.Xfrm.Ext.width() / emuPerPixel),
+			height: int(gf.Xfrm.Ext.height() / emuPerPixel),
+		})
+	}
+	return refs
+}
+
 // extractChartSeries extracts a ChartSeries from XML.
 func extractChartSeries(ser xmlChartSeries) *ChartSeries {
-	series := &ChartSeries{}
-
-	// Extract series name
-	if ser.Tx.StrRef.F != "" {
-		series.Name = extractRangeFromFormula(ser.Tx.StrRef.F)
-	}
+	series := &ChartSeries{Name: seriesNameFromTx(ser.Tx)}
 
 	// Extract categories
 	if ser.Cat.StrRef.F != "" {
@@ -676,13 +1028,101 @@ func extractChartSeries(ser xmlChartSeries) *ChartSeries {
 	}
 
 	// Extract values
-	if ser.Val.NumRef.F != "" {
-		series.Values = extractRangeFromFormula(ser.Val.NumRef.F)
-	} else if ser.Val.StrRef.F != "" {
-		series.Values = extractRangeFromFormula(ser.Val.StrRef.F)
-	}
+	series.Values = refFromSeriesRef(ser.Val)
 
 	return series
+}
+
+// extractScatterSeries maps a scatter series' xVal/yVal numeric references
+// back onto Categories/Values.
+func extractScatterSeries(ser xmlScatterSeries) *ChartSeries {
+	return &ChartSeries{
+		Name:       seriesNameFromTx(ser.Tx),
+		Categories: refFromSeriesRef(ser.XVal),
+		Values:     refFromSeriesRef(ser.YVal),
+	}
+}
+
+// seriesNameFromTx recovers a series name: literal text from c:v, or the
+// reference form older files wrote into c:strRef.
+func seriesNameFromTx(tx xmlChartSeriesTx) string {
+	if tx.V != "" {
+		return tx.V
+	}
+	if tx.StrRef.F != "" {
+		return extractRangeFromFormula(tx.StrRef.F)
+	}
+	return ""
+}
+
+// refFromSeriesRef extracts the range from a numRef-first series reference.
+func refFromSeriesRef(r xmlChartSeriesRef) string {
+	if r.NumRef.F != "" {
+		return extractRangeFromFormula(r.NumRef.F)
+	}
+	if r.StrRef.F != "" {
+		return extractRangeFromFormula(r.StrRef.F)
+	}
+	return ""
+}
+
+// extractChartAxes recovers the axis configuration for a loaded chart.
+// Scatter charts encode both axes as valAx, distinguished by axPos; other
+// cartesian charts use catAx for X and the first valAx for Y. Pie charts
+// have no axes.
+func extractChartAxes(pa *xmlPlotArea, ct ChartType) (x, y *ChartAxis) {
+	if ct == ChartTypeScatter {
+		for i := range pa.ValAx {
+			pos := ""
+			if pa.ValAx[i].AxPos != nil {
+				pos = pa.ValAx[i].AxPos.Val
+			}
+			switch pos {
+			case "b":
+				if x == nil {
+					x = axisFromXML(&pa.ValAx[i])
+				}
+			case "l":
+				if y == nil {
+					y = axisFromXML(&pa.ValAx[i])
+				}
+			default:
+				if x == nil {
+					x = axisFromXML(&pa.ValAx[i])
+				} else if y == nil {
+					y = axisFromXML(&pa.ValAx[i])
+				}
+			}
+		}
+		return x, y
+	}
+	if len(pa.CatAx) > 0 {
+		x = axisFromXML(&pa.CatAx[0])
+	}
+	if len(pa.ValAx) > 0 {
+		y = axisFromXML(&pa.ValAx[0])
+	}
+	return x, y
+}
+
+func axisFromXML(ax *xmlChartAxis) *ChartAxis {
+	out := &ChartAxis{Title: chartTitleText(ax.Title)}
+	if ax.Delete != nil {
+		out.Hidden = ax.Delete.Val
+	}
+	return out
+}
+
+// chartTitleText concatenates the runs of a rich-text chart or axis title.
+func chartTitleText(t *xmlChartTitle) string {
+	if t == nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, r := range t.Tx.Rich.P.R {
+		sb.WriteString(r.T)
+	}
+	return sb.String()
 }
 
 // extractRangeFromFormula extracts a cell range from a formula like "'Sheet1'!$A$1:$A$10"
@@ -703,14 +1143,14 @@ func extractRangeFromFormula(formula string) string {
 // ======================================================================
 
 type xmlPivotTableDefinition struct {
-	XMLName     xml.Name             `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotTableDefinition"`
-	Name        string               `xml:"name,attr"`
-	CacheID     int                  `xml:"cacheId,attr"`
-	Location    xmlPivotLocation     `xml:"location"`
-	PivotFields xmlPivotFields       `xml:"pivotFields"`
-	RowFields   *xmlPivotFieldRefs   `xml:"rowFields,omitempty"`
-	ColFields   *xmlPivotFieldRefs   `xml:"colFields,omitempty"`
-	DataFields  *xmlPivotDataFields  `xml:"dataFields,omitempty"`
+	XMLName     xml.Name            `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotTableDefinition"`
+	Name        string              `xml:"name,attr"`
+	CacheID     int                 `xml:"cacheId,attr"`
+	Location    xmlPivotLocation    `xml:"location"`
+	PivotFields xmlPivotFields      `xml:"pivotFields"`
+	RowFields   *xmlPivotFieldRefs  `xml:"rowFields,omitempty"`
+	ColFields   *xmlPivotFieldRefs  `xml:"colFields,omitempty"`
+	DataFields  *xmlPivotDataFields `xml:"dataFields,omitempty"`
 }
 
 type xmlPivotLocation struct {
@@ -718,8 +1158,8 @@ type xmlPivotLocation struct {
 }
 
 type xmlPivotFields struct {
-	Count  int              `xml:"count,attr"`
-	Fields []xmlPivotField  `xml:"pivotField"`
+	Count  int             `xml:"count,attr"`
+	Fields []xmlPivotField `xml:"pivotField"`
 }
 
 type xmlPivotField struct {
@@ -728,7 +1168,7 @@ type xmlPivotField struct {
 }
 
 type xmlPivotFieldRefs struct {
-	Count  int              `xml:"count,attr"`
+	Count  int                `xml:"count,attr"`
 	Fields []xmlPivotFieldRef `xml:"field"`
 }
 
@@ -737,8 +1177,8 @@ type xmlPivotFieldRef struct {
 }
 
 type xmlPivotDataFields struct {
-	Count  int                  `xml:"count,attr"`
-	Fields []xmlPivotDataField  `xml:"dataField"`
+	Count  int                 `xml:"count,attr"`
+	Fields []xmlPivotDataField `xml:"dataField"`
 }
 
 type xmlPivotDataField struct {
@@ -748,14 +1188,14 @@ type xmlPivotDataField struct {
 }
 
 type xmlPivotCacheDefinition struct {
-	XMLName      xml.Name           `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotCacheDefinition"`
-	CacheSource  xmlCacheSource     `xml:"cacheSource"`
-	CacheFields  xmlCacheFields     `xml:"cacheFields"`
+	XMLName     xml.Name       `xml:"http://schemas.openxmlformats.org/spreadsheetml/2006/main pivotCacheDefinition"`
+	CacheSource xmlCacheSource `xml:"cacheSource"`
+	CacheFields xmlCacheFields `xml:"cacheFields"`
 }
 
 type xmlCacheSource struct {
-	Type             string          `xml:"type,attr"`
-	WorksheetSource  xmlWorksheetSrc `xml:"worksheetSource"`
+	Type            string          `xml:"type,attr"`
+	WorksheetSource xmlWorksheetSrc `xml:"worksheetSource"`
 }
 
 type xmlWorksheetSrc struct {
@@ -764,7 +1204,7 @@ type xmlWorksheetSrc struct {
 }
 
 type xmlCacheFields struct {
-	Count  int            `xml:"count,attr"`
+	Count  int             `xml:"count,attr"`
 	Fields []xmlCacheField `xml:"cacheField"`
 }
 
@@ -775,7 +1215,8 @@ type xmlCacheField struct {
 // loadPivotTables reads the pivot table definitions for the given sheet index.
 func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
 	// 1. Find the pivot table relationships in sheet rels.
-	relsPath := fmt.Sprintf("xl/worksheets/_rels/sheet%d.xml.rels", sheetIndex+1)
+	sheetPath := fmt.Sprintf("xl/worksheets/sheet%d.xml", sheetIndex+1)
+	relsPath := relsPathFor(sheetPath)
 	relsRaw, err := readZipFile(zr, relsPath)
 	if err != nil {
 		return nil, nil // No rels means no pivot tables
@@ -788,12 +1229,18 @@ func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
 
 	var pivotTables []*PivotTable
 	for _, rel := range rels.Rels {
-		if !strings.Contains(rel.Target, "pivotTables/") {
+		if rel.TargetMode == "External" {
+			continue
+		}
+		if !strings.HasSuffix(rel.Type, "/pivotTable") && !strings.Contains(rel.Target, "pivotTables/") {
 			continue
 		}
 
 		// Resolve pivot table path
-		ptPath := path.Clean(path.Join("xl/worksheets", rel.Target))
+		ptPath := resolvePartPath(sheetPath, rel.Target)
+		if ptPath == "" {
+			continue
+		}
 		raw, err := readZipFile(zr, ptPath)
 		if err != nil {
 			continue
@@ -810,14 +1257,36 @@ func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
 			Ref:  ptDef.Location.Ref,
 		}
 
+		// Field names live in the cache definition; pivotField/dataField
+		// elements reference them by index.
+		var cacheNames []string
+		cachePath := pivotCacheDefPath(zr, ptDef.CacheID)
+		if cacheRaw, err := readZipFile(zr, cachePath); err == nil {
+			var cacheDef xmlPivotCacheDefinition
+			if err := xml.Unmarshal(cacheRaw, &cacheDef); err == nil {
+				pt.SourceRef = cacheDef.CacheSource.WorksheetSource.Ref
+				for _, cf := range cacheDef.CacheFields.Fields {
+					cacheNames = append(cacheNames, cf.Name)
+				}
+			}
+		}
+		fieldName := func(x int) string {
+			if x >= 0 && x < len(cacheNames) && cacheNames[x] != "" {
+				return cacheNames[x]
+			}
+			// Files written by older versions of this library stored the
+			// name on the pivotField element instead.
+			if x >= 0 && x < len(ptDef.PivotFields.Fields) {
+				return ptDef.PivotFields.Fields[x].Name
+			}
+			return ""
+		}
+
 		// Extract row fields
 		if ptDef.RowFields != nil {
 			for _, fieldRef := range ptDef.RowFields.Fields {
-				if fieldRef.X < len(ptDef.PivotFields.Fields) {
-					fieldName := ptDef.PivotFields.Fields[fieldRef.X].Name
-					if fieldName != "" {
-						pt.RowFields = append(pt.RowFields, fieldName)
-					}
+				if name := fieldName(fieldRef.X); name != "" {
+					pt.RowFields = append(pt.RowFields, name)
 				}
 			}
 		}
@@ -825,34 +1294,29 @@ func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
 		// Extract col fields
 		if ptDef.ColFields != nil {
 			for _, fieldRef := range ptDef.ColFields.Fields {
-				if fieldRef.X < len(ptDef.PivotFields.Fields) {
-					fieldName := ptDef.PivotFields.Fields[fieldRef.X].Name
-					if fieldName != "" {
-						pt.ColFields = append(pt.ColFields, fieldName)
-					}
+				if name := fieldName(fieldRef.X); name != "" {
+					pt.ColFields = append(pt.ColFields, name)
 				}
 			}
 		}
 
-		// Extract data fields
+		// Extract data fields. The name attribute is the display caption;
+		// the aggregated source column is the fld index.
 		if ptDef.DataFields != nil {
 			for _, df := range ptDef.DataFields.Fields {
-				dataField := &PivotDataField{
-					Name:        df.Name,
-					DisplayName: df.Name,
-					Aggregation: df.Subtotal,
+				name := fieldName(df.Field)
+				if name == "" {
+					name = df.Name
 				}
-				pt.DataFields = append(pt.DataFields, dataField)
-			}
-		}
-
-		// Try to load cache definition to get source ref
-		cachePath := fmt.Sprintf("xl/pivotCache/pivotCacheDefinition%d.xml", ptDef.CacheID)
-		cacheRaw, err := readZipFile(zr, cachePath)
-		if err == nil {
-			var cacheDef xmlPivotCacheDefinition
-			if err := xml.Unmarshal(cacheRaw, &cacheDef); err == nil {
-				pt.SourceRef = cacheDef.CacheSource.WorksheetSource.Ref
+				subtotal := df.Subtotal
+				if subtotal == "" {
+					subtotal = PivotAggregationSum // schema default
+				}
+				pt.DataFields = append(pt.DataFields, &PivotDataField{
+					Name:        name,
+					DisplayName: df.Name,
+					Aggregation: subtotal,
+				})
 			}
 		}
 
@@ -860,4 +1324,44 @@ func loadPivotTables(zr *zip.Reader, sheetIndex int) ([]*PivotTable, error) {
 	}
 
 	return pivotTables, nil
+}
+
+// pivotCacheDefPath locates the pivot cache definition part for a cacheId,
+// preferring the workbook-level <pivotCaches> mapping and falling back to
+// the conventional part name.
+func pivotCacheDefPath(zr *zip.Reader, cacheID int) string {
+	if wbRaw, err := readZipFile(zr, "xl/workbook.xml"); err == nil {
+		var wbx struct {
+			PivotCaches struct {
+				Caches []struct {
+					CacheID int    `xml:"cacheId,attr"`
+					RID     string `xml:"http://schemas.openxmlformats.org/officeDocument/2006/relationships id,attr"`
+				} `xml:"pivotCache"`
+			} `xml:"pivotCaches"`
+		}
+		if xml.Unmarshal(wbRaw, &wbx) == nil {
+			for _, c := range wbx.PivotCaches.Caches {
+				if c.CacheID != cacheID || c.RID == "" {
+					continue
+				}
+				relsRaw, err := readZipFile(zr, "xl/_rels/workbook.xml.rels")
+				if err != nil {
+					break
+				}
+				var rels xmlRelationships
+				if xml.Unmarshal(relsRaw, &rels) != nil {
+					break
+				}
+				for _, rel := range rels.Rels {
+					if rel.ID == c.RID {
+						if p := resolvePartPath("xl/workbook.xml", rel.Target); p != "" {
+							return p
+						}
+					}
+				}
+				break
+			}
+		}
+	}
+	return fmt.Sprintf("xl/pivotCache/pivotCacheDefinition%d.xml", cacheID)
 }

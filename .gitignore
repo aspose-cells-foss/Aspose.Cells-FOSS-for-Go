@@ -27,8 +27,9 @@ go.work.sum
 # env file
 .env
 
-# Generated workbook output from examples/ (keep the directory placeholder)
-examples/outputfiles/*.xlsx
+# Generated output from examples/ (keep the directory placeholder)
+examples/outputfiles/*
+!examples/outputfiles/.gitkeep
 
 # Editor/IDE
 # .idea/

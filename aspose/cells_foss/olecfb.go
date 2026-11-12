@@ -4,50 +4,45 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"unicode/utf16"
 )
 
 // ---------------------------------------------------------------------------
-// Minimal OLE/CFB (Compound Binary File) writer
+// Minimal OLE/CFB (Compound Binary File) writer and reader
 //
-// This implements just enough of the OLE/CFB format (MS-CFB) to produce
-// files that Microsoft Excel can read as Agile-Encryption wrappers.
+// This implements just enough of the OLE/CFB format (MS-CFB) to produce and
+// read files that Microsoft Excel accepts as Agile-Encryption wrappers.
 //
 // Reference: [MS-CFB] Compound File Binary File Format
 // https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb
 //
 // The writer produces a version-3 compound file (sector size 512,
 // mini-sector size 64) containing:
-//   - Header (512 bytes)
+//   - Header (512 bytes, including the 109-entry DIFAT array)
 //   - FAT sector(s)
+//   - DIFAT sector(s) (only when more than 109 FAT sectors are needed)
 //   - Directory sector(s)
-//   - Mini-stream FAT sector(s)
+//   - Mini-FAT sector(s)
 //   - Mini-stream data (for the small EncryptionInfo stream)
 //   - Regular data sectors (for the large EncryptedPackage stream)
 // ---------------------------------------------------------------------------
 
 const (
-	cfbMagic               = 0xB1A1CF11E0A1F0CE // not used directly; see cfbMagicBytes
-	cfbVersion3            = 3
-	cfbSectorSize3         = 512
-	cfbMiniSectorSize      = 64
-	cfbMiniStreamCutoff    = 4096
-	cfbDirEntrySize        = 128
-	cfbFATEntriesPerSector = cfbSectorSize3 / 4 // 128
+	cfbVersion3              = 3
+	cfbSectorSize3           = 512
+	cfbMiniSectorSize        = 64
+	cfbMiniStreamCutoff      = 4096
+	cfbDirEntrySize          = 128
+	cfbHeaderSize            = 512
+	cfbFATEntriesPerSector   = cfbSectorSize3 / 4         // 128
+	cfbHeaderDIFATEntries    = 109                        // DIFAT slots in the header
+	cfbDIFATEntriesPerSector = cfbFATEntriesPerSector - 1 // 127 IDs + next-sector pointer
 
-	// Special FAT values.
-	cfbFreeSector  = 0xFFFFFFFF // 0xFFFFFFFE is actually free; see below
-	cfbEndOfChain  = 0xFFFFFFFE
-	cfbFATSector   = 0xFFFFFFFD
-	cfbDIFATSector = 0xFFFFFFFC
-
-	// Actually the MS-CFB spec uses:
-	// FREESEC     = 0xFFFFFFFE
-	// ENDOFCHAIN  = 0xFFFFFFFE
-	// Let me use the correct values from the spec.
-	cfbFree     = 0xFFFFFFFE
-	cfbEnd      = 0xFFFFFFFE // same as free for end-of-chain
-	cfbFATVal   = 0xFFFFFFFD
-	cfbDIFATVal = 0xFFFFFFFC
+	// Special FAT values ([MS-CFB] 2.1).
+	cfbFreeSect   = 0xFFFFFFFF // unallocated sector
+	cfbEndOfChain = 0xFFFFFFFE // end of a sector chain
+	cfbFatSect    = 0xFFFFFFFD // sector holds part of the FAT
+	cfbDifSect    = 0xFFFFFFFC // sector holds part of the DIFAT chain
 )
 
 // OLE/CFB magic bytes: D0 CF 11 E0 A1 B1 1A E1
@@ -72,7 +67,7 @@ type cfbHeader struct {
 	NumMiniFATSectors  uint32
 	FirstDIFATSector   uint32
 	NumDIFATSectors    uint32
-	DIFAT              [109]uint32
+	DIFAT              [cfbHeaderDIFATEntries]uint32
 }
 
 // cfbDirEntry is a 128-byte directory entry.
@@ -96,22 +91,23 @@ type cfbDirEntry struct {
 // that Microsoft Excel can open.
 //
 // The container has:
-//   - "EncryptionInfo" stream: 4-byte version header + XML
+//   - "EncryptionInfo" stream: 4-byte version + 4-byte reserved + XML
 //   - "EncryptedPackage" stream: 8-byte size + encrypted bytes
 func writeEncryptedCFB(encInfoXML, encryptedPkg []byte, origSize uint64) ([]byte, error) {
-	// Build stream contents.
 	infoStream := buildEncryptionInfoStream(encInfoXML)
 	pkgStream := buildEncryptedPackageStream(encryptedPkg, origSize)
 
 	return writeCFBContainer(infoStream, pkgStream)
 }
 
-// buildEncryptionInfoStream prepends the 4-byte Agile version header.
+// buildEncryptionInfoStream prepends the 8-byte Agile header: version
+// 0x00040004 (major=4, minor=4) followed by the 4-byte reserved field,
+// which the spec fixes at 0x00000040 ([MS-OFFCRYPTO] 2.3.4.5).
 func buildEncryptionInfoStream(infoXML []byte) []byte {
-	buf := make([]byte, 4+len(infoXML))
-	// Agile Encryption version: 0x00040004 (major=4, minor=4).
-	binary.LittleEndian.PutUint32(buf[:4], 0x00040004)
-	copy(buf[4:], infoXML)
+	buf := make([]byte, 8+len(infoXML))
+	binary.LittleEndian.PutUint32(buf[:4], agileVersion)
+	binary.LittleEndian.PutUint32(buf[4:8], 0x40)
+	copy(buf[8:], infoXML)
 	return buf
 }
 
@@ -127,43 +123,22 @@ func buildEncryptedPackageStream(encPkg []byte, origSize uint64) []byte {
 //
 // Layout:
 //
-//	Sector 0:    FAT sector(s)
-//	Sector 1+:   Directory sector(s)
-//	Then:        Mini-FAT sector(s)
-//	Then:        Mini-stream data (EncryptionInfo, < 4096 bytes)
-//	Then:        EncryptedPackage data (regular sectors)
+//	Sectors [0..f):      FAT sectors
+//	Sectors [f..f+d):    DIFAT sectors (only when f > 109)
+//	Then:                Directory sector(s)
+//	Then:                Mini-FAT sector(s)
+//	Then:                Mini-stream data (EncryptionInfo, < 4096 bytes)
+//	Then:                EncryptedPackage data (regular sectors)
 func writeCFBContainer(infoStream, pkgStream []byte) ([]byte, error) {
-	// Calculate sector counts.
-	infoBytes := infoStream
-	pkgBytes := pkgStream
-
 	// Determine which streams go in the mini-stream (< 4096 bytes).
-	infoInMiniStream := len(infoBytes) < cfbMiniStreamCutoff
-	pkgInMiniStream := len(pkgBytes) < cfbMiniStreamCutoff
+	infoInMiniStream := len(infoStream) < cfbMiniStreamCutoff
+	pkgInMiniStream := len(pkgStream) < cfbMiniStreamCutoff
 
-	// Mini-stream: holds small streams.
-	var infoMiniSectors, pkgMiniSectors int
-	var miniStreamSize int
-
-	if infoInMiniStream {
-		infoMiniSectors = (len(infoBytes) + cfbMiniSectorSize - 1) / cfbMiniSectorSize
-		if infoMiniSectors == 0 {
-			infoMiniSectors = 1
-		}
-	}
-	if pkgInMiniStream {
-		pkgMiniSectors = (len(pkgBytes) + cfbMiniSectorSize - 1) / cfbMiniSectorSize
-		if pkgMiniSectors == 0 {
-			pkgMiniSectors = 1
-		}
-	}
+	infoMiniSectors := miniSectorCount(len(infoStream), infoInMiniStream)
+	pkgMiniSectors := miniSectorCount(len(pkgStream), pkgInMiniStream)
 
 	totalMiniSectors := infoMiniSectors + pkgMiniSectors
-	if totalMiniSectors > 0 {
-		miniStreamSize = totalMiniSectors * cfbMiniSectorSize
-	}
-
-	// Mini-stream data sectors in the compound file.
+	miniStreamSize := totalMiniSectors * cfbMiniSectorSize
 	miniStreamSectors := (miniStreamSize + cfbSectorSize3 - 1) / cfbSectorSize3
 
 	// Mini-FAT: one entry per mini-sector used.
@@ -176,39 +151,41 @@ func writeCFBContainer(infoStream, pkgStream []byte) ([]byte, error) {
 	// Regular sectors for EncryptedPackage (if not in mini-stream).
 	pkgSectors := 0
 	if !pkgInMiniStream {
-		pkgSectors = (len(pkgBytes) + cfbSectorSize3 - 1) / cfbSectorSize3
-		if pkgSectors == 0 {
-			pkgSectors = 1
-		}
+		pkgSectors = (len(pkgStream) + cfbSectorSize3 - 1) / cfbSectorSize3
 	}
 
 	// Directory: 1 sector (4 entries, we use 3).
 	dirSectors := 1
 
-	// FAT: we need enough FAT sectors to cover all sectors.
-	// Total sectors (excluding header): FAT + Dir + MiniFAT + MiniStream + Package
-	// Start with 1 FAT sector and grow if needed.
-	fatSectors := 1
 	totalDataSectors := dirSectors + miniFATSectors + miniStreamSectors + pkgSectors
-	for {
-		fatCapacity := fatSectors * cfbFATEntriesPerSector
-		// Each FAT sector itself uses a FAT entry, so subtract fatSectors.
-		usable := fatCapacity - fatSectors
-		if usable >= totalDataSectors+fatSectors {
+
+	// FAT sizing is a fixed point: FAT sectors cover every sector in the
+	// file (including FAT and DIFAT sectors), and once more than 109 FAT
+	// sectors exist, DIFAT sectors are needed to index them, which in turn
+	// adds sectors the FAT must cover.
+	fatSectors, difatSectors := 1, 0
+	for iter := 0; iter < 64; iter++ {
+		d := 0
+		if fatSectors > cfbHeaderDIFATEntries {
+			d = (fatSectors - cfbHeaderDIFATEntries + cfbDIFATEntriesPerSector - 1) / cfbDIFATEntriesPerSector
+		}
+		total := fatSectors + d + totalDataSectors
+		need := (total + cfbFATEntriesPerSector - 1) / cfbFATEntriesPerSector
+		if need < 1 {
+			need = 1
+		}
+		if need == fatSectors && d == difatSectors {
 			break
 		}
-		fatSectors++
+		fatSectors, difatSectors = need, d
 	}
 
-	// Sector allocation:
-	//   Sectors [0 .. fatSectors-1]: FAT
-	//   Sectors [fatSectors .. fatSectors+dirSectors-1]: Directory
-	//   Then: Mini-FAT sectors
-	//   Then: Mini-stream data
-	//   Then: Package data
+	// Sector allocation.
 	sectorIdx := 0
 	fatStart := sectorIdx
 	sectorIdx += fatSectors
+	difatStart := sectorIdx
+	sectorIdx += difatSectors
 	dirStart := sectorIdx
 	sectorIdx += dirSectors
 	miniFATStart := sectorIdx
@@ -222,118 +199,77 @@ func writeCFBContainer(infoStream, pkgStream []byte) ([]byte, error) {
 	// Build FAT.
 	fat := make([]uint32, fatSectors*cfbFATEntriesPerSector)
 	for i := range fat {
-		fat[i] = cfbFree
+		fat[i] = cfbFreeSect
 	}
-	// FAT sectors themselves.
 	for i := 0; i < fatSectors; i++ {
-		fat[fatStart+i] = cfbFATVal
+		fat[fatStart+i] = cfbFatSect
 	}
-	// Directory chain.
-	for i := 0; i < dirSectors; i++ {
-		if i < dirSectors-1 {
-			fat[dirStart+i] = uint32(dirStart + i + 1)
-		} else {
-			fat[dirStart+i] = cfbEndOfChain
-		}
+	for i := 0; i < difatSectors; i++ {
+		fat[difatStart+i] = cfbDifSect
 	}
-	// Mini-FAT chain.
-	for i := 0; i < miniFATSectors; i++ {
-		if i < miniFATSectors-1 {
-			fat[miniFATStart+i] = uint32(miniFATStart + i + 1)
-		} else {
-			fat[miniFATStart+i] = cfbEndOfChain
-		}
-	}
-	// Mini-stream data chain.
-	for i := 0; i < miniStreamSectors; i++ {
-		if i < miniStreamSectors-1 {
-			fat[miniStreamStart+i] = uint32(miniStreamStart + i + 1)
-		} else {
-			fat[miniStreamStart+i] = cfbEndOfChain
-		}
-	}
-	// Package data chain.
-	for i := 0; i < pkgSectors; i++ {
-		if i < pkgSectors-1 {
-			fat[pkgStart+i] = uint32(pkgStart + i + 1)
-		} else {
-			fat[pkgStart+i] = cfbEndOfChain
-		}
-	}
+	writeChain(fat, dirStart, dirSectors)
+	writeChain(fat, miniFATStart, miniFATSectors)
+	writeChain(fat, miniStreamStart, miniStreamSectors)
+	writeChain(fat, pkgStart, pkgSectors)
 
 	// Build Mini-FAT: chains for streams within the mini-stream.
 	miniFAT := make([]uint32, miniFATSectors*cfbFATEntriesPerSector)
 	for i := range miniFAT {
-		miniFAT[i] = cfbFree
+		miniFAT[i] = cfbFreeSect
 	}
-	// EncryptionInfo chain.
 	pkgMiniStart := infoMiniSectors // package starts after info in mini-stream
-	if infoInMiniStream {
-		for i := 0; i < infoMiniSectors; i++ {
-			if i < infoMiniSectors-1 {
-				miniFAT[i] = uint32(i + 1)
-			} else {
-				miniFAT[i] = cfbEndOfChain
-			}
-		}
-	}
-	// EncryptedPackage chain (if in mini-stream).
-	if pkgInMiniStream {
-		for i := 0; i < pkgMiniSectors; i++ {
-			idx := pkgMiniStart + i
-			if i < pkgMiniSectors-1 {
-				miniFAT[idx] = uint32(idx + 1)
-			} else {
-				miniFAT[idx] = cfbEndOfChain
-			}
-		}
-	}
+	writeChain(miniFAT, 0, infoMiniSectors)
+	writeChain(miniFAT, pkgMiniStart, pkgMiniSectors)
 
 	// Build directory entries.
 	dirEntries := make([]cfbDirEntry, 4) // root + 2 streams + 1 unused
 
-	// Entry 0: Root Entry.
+	// Entry 0: Root Entry. Its stream is the mini-stream container.
 	writeDirName(&dirEntries[0], "Root Entry")
 	dirEntries[0].NameSize = uint16(len("Root Entry")*2 + 2)
-	dirEntries[0].Type = 5  // root storage
-	dirEntries[0].Color = 1 // black
-	dirEntries[0].LeftSiblingID = 0xFFFFFFFF
-	dirEntries[0].RightSiblingID = 0xFFFFFFFF
+	dirEntries[0].Type = 5 // root storage
+	dirEntries[0].Color = 1
+	dirEntries[0].LeftSiblingID = cfbFreeSect
+	dirEntries[0].RightSiblingID = cfbFreeSect
 	dirEntries[0].ChildID = 1 // first child is EncryptionInfo
-	dirEntries[0].StartSector = uint32(miniStreamStart)
-	dirEntries[0].Size = uint64(miniStreamSize)
+	if totalMiniSectors > 0 {
+		dirEntries[0].StartSector = uint32(miniStreamStart)
+		dirEntries[0].Size = uint64(miniStreamSize)
+	} else {
+		dirEntries[0].StartSector = cfbEndOfChain
+	}
 
 	// Entry 1: EncryptionInfo stream.
 	writeDirName(&dirEntries[1], "EncryptionInfo")
 	dirEntries[1].NameSize = uint16(len("EncryptionInfo")*2 + 2)
-	dirEntries[1].Type = 2  // stream
-	dirEntries[1].Color = 1 // black
-	dirEntries[1].LeftSiblingID = 0xFFFFFFFF
+	dirEntries[1].Type = 2 // stream
+	dirEntries[1].Color = 1
+	dirEntries[1].LeftSiblingID = cfbFreeSect
 	dirEntries[1].RightSiblingID = 2
-	dirEntries[1].ChildID = 0xFFFFFFFF
+	dirEntries[1].ChildID = cfbFreeSect
 	dirEntries[1].StartSector = 0 // first mini-sector
-	dirEntries[1].Size = uint64(len(infoBytes))
+	dirEntries[1].Size = uint64(len(infoStream))
 
 	// Entry 2: EncryptedPackage stream.
 	writeDirName(&dirEntries[2], "EncryptedPackage")
 	dirEntries[2].NameSize = uint16(len("EncryptedPackage")*2 + 2)
-	dirEntries[2].Type = 2  // stream
-	dirEntries[2].Color = 1 // black
-	dirEntries[2].LeftSiblingID = 0xFFFFFFFF
-	dirEntries[2].RightSiblingID = 0xFFFFFFFF
-	dirEntries[2].ChildID = 0xFFFFFFFF
+	dirEntries[2].Type = 2 // stream
+	dirEntries[2].Color = 1
+	dirEntries[2].LeftSiblingID = cfbFreeSect
+	dirEntries[2].RightSiblingID = cfbFreeSect
+	dirEntries[2].ChildID = cfbFreeSect
 	if pkgInMiniStream {
 		dirEntries[2].StartSector = uint32(pkgMiniStart) // mini-sector
 	} else {
 		dirEntries[2].StartSector = uint32(pkgStart) // regular sector
 	}
-	dirEntries[2].Size = uint64(len(pkgBytes))
+	dirEntries[2].Size = uint64(len(pkgStream))
 
 	// Entry 3: unused.
 	dirEntries[3].Type = 0
-	dirEntries[3].LeftSiblingID = 0xFFFFFFFF
-	dirEntries[3].RightSiblingID = 0xFFFFFFFF
-	dirEntries[3].ChildID = 0xFFFFFFFF
+	dirEntries[3].LeftSiblingID = cfbFreeSect
+	dirEntries[3].RightSiblingID = cfbFreeSect
+	dirEntries[3].ChildID = cfbFreeSect
 
 	// Build header.
 	var hdr cfbHeader
@@ -347,67 +283,123 @@ func writeCFBContainer(infoStream, pkgStream []byte) ([]byte, error) {
 	hdr.NumFATSectors = uint32(fatSectors)
 	hdr.FirstDirSector = uint32(dirStart)
 	hdr.MiniStreamCutoff = cfbMiniStreamCutoff
-	hdr.FirstMiniFATSector = uint32(miniFATStart)
+	if miniFATSectors > 0 {
+		hdr.FirstMiniFATSector = uint32(miniFATStart)
+	} else {
+		hdr.FirstMiniFATSector = cfbEndOfChain
+	}
 	hdr.NumMiniFATSectors = uint32(miniFATSectors)
-	hdr.FirstDIFATSector = 0xFFFFFFFE // none
-	hdr.NumDIFATSectors = 0
+	if difatSectors > 0 {
+		hdr.FirstDIFATSector = uint32(difatStart)
+	} else {
+		hdr.FirstDIFATSector = cfbEndOfChain
+	}
+	hdr.NumDIFATSectors = uint32(difatSectors)
 
-	// Fill DIFAT array in header (up to 109 entries).
-	for i := 0; i < 109; i++ {
-		if i < fatSectors {
+	// Header DIFAT array: first min(109, fatSectors) FAT sector IDs.
+	headerFATIDs := fatSectors
+	if headerFATIDs > cfbHeaderDIFATEntries {
+		headerFATIDs = cfbHeaderDIFATEntries
+	}
+	for i := 0; i < cfbHeaderDIFATEntries; i++ {
+		if i < headerFATIDs {
 			hdr.DIFAT[i] = uint32(fatStart + i)
 		} else {
-			hdr.DIFAT[i] = 0xFFFFFFFF // free
+			hdr.DIFAT[i] = cfbFreeSect
 		}
 	}
 
 	// Assemble the file.
-	fileSize := 512 + totalSectors*cfbSectorSize3
+	fileSize := cfbHeaderSize + totalSectors*cfbSectorSize3
 	out := make([]byte, fileSize)
 
 	// Write header.
 	var hdrBuf bytes.Buffer
 	binary.Write(&hdrBuf, binary.LittleEndian, &hdr)
-	copy(out[:512], hdrBuf.Bytes())
+	copy(out[:cfbHeaderSize], hdrBuf.Bytes())
 
 	// Write FAT sector(s).
 	for i := 0; i < fatSectors; i++ {
-		off := 512 + (fatStart+i)*cfbSectorSize3
+		off := cfbHeaderSize + (fatStart+i)*cfbSectorSize3
 		for j := 0; j < cfbFATEntriesPerSector; j++ {
 			binary.LittleEndian.PutUint32(out[off+j*4:], fat[i*cfbFATEntriesPerSector+j])
 		}
 	}
 
+	// Write DIFAT sector(s): 127 FAT sector IDs each, last slot is the
+	// next DIFAT sector (or ENDOFCHAIN).
+	for i := 0; i < difatSectors; i++ {
+		off := cfbHeaderSize + (difatStart+i)*cfbSectorSize3
+		for j := 0; j < cfbDIFATEntriesPerSector; j++ {
+			id := cfbHeaderDIFATEntries + i*cfbDIFATEntriesPerSector + j
+			v := uint32(cfbFreeSect)
+			if id < fatSectors {
+				v = uint32(fatStart + id)
+			}
+			binary.LittleEndian.PutUint32(out[off+j*4:], v)
+		}
+		next := uint32(cfbEndOfChain)
+		if i < difatSectors-1 {
+			next = uint32(difatStart + i + 1)
+		}
+		binary.LittleEndian.PutUint32(out[off+cfbDIFATEntriesPerSector*4:], next)
+	}
+
 	// Write directory sector(s).
-	dirOff := 512 + dirStart*cfbSectorSize3
-	for i, entry := range dirEntries {
-		off := dirOff + i*cfbDirEntrySize
-		writeDirEntry(out[off:], &entry)
+	dirOff := cfbHeaderSize + dirStart*cfbSectorSize3
+	for i := range dirEntries {
+		writeDirEntry(out[dirOff+i*cfbDirEntrySize:], &dirEntries[i])
 	}
 
 	// Write Mini-FAT sector(s).
-	mfOff := 512 + miniFATStart*cfbSectorSize3
-	for i := 0; i < miniFATEntries; i++ {
-		binary.LittleEndian.PutUint32(out[mfOff+i*4:], miniFAT[i])
+	if miniFATEntries > 0 {
+		mfOff := cfbHeaderSize + miniFATStart*cfbSectorSize3
+		for i := 0; i < miniFATEntries; i++ {
+			binary.LittleEndian.PutUint32(out[mfOff+i*4:], miniFAT[i])
+		}
 	}
 
 	// Write mini-stream data.
-	msOff := 512 + miniStreamStart*cfbSectorSize3
-	if infoInMiniStream {
-		copy(out[msOff:], infoBytes)
-	}
-	if pkgInMiniStream {
-		pkgMsOff := msOff + infoMiniSectors*cfbMiniSectorSize
-		copy(out[pkgMsOff:], pkgBytes)
+	if totalMiniSectors > 0 {
+		msOff := cfbHeaderSize + miniStreamStart*cfbSectorSize3
+		if infoInMiniStream {
+			copy(out[msOff:], infoStream)
+		}
+		if pkgInMiniStream {
+			copy(out[msOff+infoMiniSectors*cfbMiniSectorSize:], pkgStream)
+		}
 	}
 
 	// Write package data (EncryptedPackage) if not in mini-stream.
-	if !pkgInMiniStream {
-		pkgOff := 512 + pkgStart*cfbSectorSize3
-		copy(out[pkgOff:], pkgBytes)
+	if !pkgInMiniStream && pkgSectors > 0 {
+		copy(out[cfbHeaderSize+pkgStart*cfbSectorSize3:], pkgStream)
 	}
 
 	return out, nil
+}
+
+// miniSectorCount returns how many 64-byte mini-sectors n bytes occupy.
+func miniSectorCount(n int, inMini bool) int {
+	if !inMini {
+		return 0
+	}
+	c := (n + cfbMiniSectorSize - 1) / cfbMiniSectorSize
+	if c == 0 {
+		c = 1
+	}
+	return c
+}
+
+// writeChain marks count consecutive fat entries starting at start as a
+// single sector chain terminated by ENDOFCHAIN. count==0 is a no-op.
+func writeChain(fat []uint32, start, count int) {
+	for i := 0; i < count; i++ {
+		if i < count-1 {
+			fat[start+i] = uint32(start + i + 1)
+		} else {
+			fat[start+i] = cfbEndOfChain
+		}
+	}
 }
 
 // writeDirName encodes an ASCII name as UTF-16LE into a directory entry.
@@ -440,154 +432,299 @@ func writeDirEntry(buf []byte, e *cfbDirEntry) {
 
 // ---------------------------------------------------------------------------
 // OLE/CFB reader (minimal — just enough to load Agile Encryption files)
+//
+// All reads are bounds-checked; malformed containers produce errors instead
+// of panics.
 // ---------------------------------------------------------------------------
+
+type cfbReader struct {
+	data         []byte
+	sectorSize   int
+	miniSectorSz int
+	miniCutoff   uint64
+	totalSectors int
+	fat          []uint32
+	firstMiniFAT uint32
+	numMiniFAT   uint32
+}
+
+// sectorOff returns the file offset of a sector, or -1 when out of range.
+func (r *cfbReader) sectorOff(idx uint32) int {
+	if int(idx) >= r.totalSectors {
+		return -1
+	}
+	return cfbHeaderSize + int(idx)*r.sectorSize
+}
+
+// chain follows a FAT chain from start, guarding against cycles and
+// out-of-range sectors. Special values (ENDOFCHAIN/FATSECT/DIFSECT/
+// FREESECT, all >= 0xFFFFFFFA) terminate the chain.
+func (r *cfbReader) chain(start uint32) ([]uint32, error) {
+	if start >= 0xFFFFFFFA {
+		return nil, nil
+	}
+	var out []uint32
+	seen := make(map[uint32]bool)
+	s := start
+	for s < 0xFFFFFFFA {
+		if seen[s] {
+			return nil, fmt.Errorf("CFB: cycle in sector chain at %d", s)
+		}
+		if int(s) >= len(r.fat) {
+			return nil, fmt.Errorf("CFB: sector %d outside FAT", s)
+		}
+		seen[s] = true
+		out = append(out, s)
+		s = r.fat[s]
+	}
+	return out, nil
+}
+
+// readChainData concatenates the sectors of a chain, clipped to size bytes.
+func (r *cfbReader) readChainData(start uint32, size uint64) ([]byte, error) {
+	if size > uint64(len(r.data)) {
+		return nil, fmt.Errorf("CFB: stream size %d exceeds file size", size)
+	}
+	sectors, err := r.chain(start)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, size)
+	pos := 0
+	for _, sid := range sectors {
+		if pos >= int(size) {
+			break
+		}
+		off := r.sectorOff(sid)
+		if off < 0 || off >= len(r.data) {
+			return nil, fmt.Errorf("CFB: sector %d outside file", sid)
+		}
+		n := r.sectorSize
+		if off+n > len(r.data) {
+			n = len(r.data) - off
+		}
+		if pos+n > int(size) {
+			n = int(size) - pos
+		}
+		copy(out[pos:pos+n], r.data[off:off+n])
+		pos += n
+	}
+	if pos < int(size) {
+		return nil, fmt.Errorf("CFB: chain for %d-byte stream ended after %d bytes", size, pos)
+	}
+	return out, nil
+}
 
 // readCFBStreams reads an OLE/CFB file and returns the named streams.
 func readCFBStreams(data []byte) (map[string][]byte, error) {
-	if len(data) < 512 {
+	if len(data) < cfbHeaderSize {
 		return nil, fmt.Errorf("file too short for CFB header")
 	}
-
-	// Verify magic.
 	for i, b := range cfbMagicBytes {
 		if data[i] != b {
 			return nil, fmt.Errorf("not a CFB file (bad magic)")
 		}
 	}
 
-	// With CLSID field, offsets are:
-	// 30: Sector shift
-	sectorShift := binary.LittleEndian.Uint16(data[30:])
-	sectorSize := 1 << sectorShift
+	r := &cfbReader{data: data}
 
-	// CFB header offsets (from MS-CFB spec):
-	// 44: Number of FAT sectors
-	// 48: First directory sector
-	// 60: First mini FAT sector
-	// 64: Number of mini FAT sectors
+	sectorShift := binary.LittleEndian.Uint16(data[30:])
+	miniSectorShift := binary.LittleEndian.Uint16(data[32:])
+	if sectorShift < 7 || sectorShift > 16 {
+		return nil, fmt.Errorf("CFB: invalid sector shift %d", sectorShift)
+	}
+	if miniSectorShift < 2 || miniSectorShift > 12 {
+		return nil, fmt.Errorf("CFB: invalid mini sector shift %d", miniSectorShift)
+	}
+	r.sectorSize = 1 << sectorShift
+	r.miniSectorSz = 1 << miniSectorShift
+	if r.sectorSize > len(data) {
+		return nil, fmt.Errorf("CFB: sector size %d exceeds file size", r.sectorSize)
+	}
+	r.totalSectors = (len(data) - cfbHeaderSize) / r.sectorSize
+
 	numFATSectors := binary.LittleEndian.Uint32(data[44:])
 	firstDirSector := binary.LittleEndian.Uint32(data[48:])
-	firstMiniFATSector := binary.LittleEndian.Uint32(data[60:])
-	numMiniFATSectors := binary.LittleEndian.Uint32(data[64:])
+	r.miniCutoff = uint64(binary.LittleEndian.Uint32(data[56:]))
+	if r.miniCutoff == 0 {
+		r.miniCutoff = cfbMiniStreamCutoff
+	}
+	r.firstMiniFAT = binary.LittleEndian.Uint32(data[60:])
+	r.numMiniFAT = binary.LittleEndian.Uint32(data[64:])
+	firstDIFATSector := binary.LittleEndian.Uint32(data[68:])
+	numDIFATSectors := binary.LittleEndian.Uint32(data[72:])
 
-	// Build sector offset helper.
-	sectorOff := func(idx uint32) int {
-		return 512 + int(idx)*sectorSize
+	if numFATSectors == 0 || numFATSectors > uint32(r.totalSectors) {
+		return nil, fmt.Errorf("CFB: invalid FAT sector count %d", numFATSectors)
 	}
 
-	// Read DIFAT from header.
-	var fatSectorIDs []uint32
-	for i := 0; i < 109; i++ {
+	// Collect FAT sector IDs: header DIFAT array first, then the DIFAT
+	// chain for files with more than 109 FAT sectors.
+	fatSectorIDs := make([]uint32, 0, numFATSectors)
+	for i := 0; i < cfbHeaderDIFATEntries && uint32(len(fatSectorIDs)) < numFATSectors; i++ {
 		v := binary.LittleEndian.Uint32(data[76+i*4:])
-		if v >= 0xFFFFFFFE {
+		if v >= 0xFFFFFFFA { // FREESECT marks unused slots
 			break
+		}
+		if int(v) >= r.totalSectors {
+			return nil, fmt.Errorf("CFB: DIFAT entry %d outside file", v)
 		}
 		fatSectorIDs = append(fatSectorIDs, v)
 	}
 	if uint32(len(fatSectorIDs)) < numFATSectors {
-		// TODO: follow DIFAT chain for large files. For our use case
-		// (small encryption wrappers) 109 FAT entries is more than enough.
-		fatSectorIDs = fatSectorIDs[:numFATSectors]
+		// Follow the DIFAT chain. Each DIFAT sector holds
+		// sectorSize/4-1 FAT IDs plus the next-DIFAT sector pointer.
+		idsPerSector := r.sectorSize/4 - 1
+		next := firstDIFATSector
+		seen := make(map[uint32]bool)
+		for i := uint32(0); i < numDIFATSectors && uint32(len(fatSectorIDs)) < numFATSectors; i++ {
+			if next >= 0xFFFFFFFA || seen[next] {
+				break
+			}
+			seen[next] = true
+			off := r.sectorOff(next)
+			if off < 0 || off+r.sectorSize > len(data) {
+				return nil, fmt.Errorf("CFB: DIFAT sector %d outside file", next)
+			}
+			for j := 0; j < idsPerSector && uint32(len(fatSectorIDs)) < numFATSectors; j++ {
+				v := binary.LittleEndian.Uint32(data[off+j*4:])
+				if v >= 0xFFFFFFFA {
+					continue
+				}
+				if int(v) >= r.totalSectors {
+					return nil, fmt.Errorf("CFB: DIFAT entry %d outside file", v)
+				}
+				fatSectorIDs = append(fatSectorIDs, v)
+			}
+			next = binary.LittleEndian.Uint32(data[off+idsPerSector*4:])
+		}
+	}
+	if uint32(len(fatSectorIDs)) < numFATSectors {
+		return nil, fmt.Errorf("CFB: found %d FAT sectors, header declares %d", len(fatSectorIDs), numFATSectors)
 	}
 
-	// Read FAT.
-	totalFATEntries := len(fatSectorIDs) * (sectorSize / 4)
-	fat := make([]uint32, totalFATEntries)
+	// Build the FAT.
+	entriesPerSector := r.sectorSize / 4
+	r.fat = make([]uint32, len(fatSectorIDs)*entriesPerSector)
 	for i, sid := range fatSectorIDs {
-		off := sectorOff(sid)
-		for j := 0; j < sectorSize/4; j++ {
-			fat[i*(sectorSize/4)+j] = binary.LittleEndian.Uint32(data[off+j*4:])
+		off := r.sectorOff(sid)
+		if off < 0 || off+r.sectorSize > len(data) {
+			return nil, fmt.Errorf("CFB: FAT sector %d outside file", sid)
+		}
+		for j := 0; j < entriesPerSector; j++ {
+			r.fat[i*entriesPerSector+j] = binary.LittleEndian.Uint32(data[off+j*4:])
 		}
 	}
 
-	// Read directory entries.
+	// Read directory entries (following the directory chain).
 	type dirInfo struct {
 		name        string
 		streamType  byte
 		startSector uint32
 		size        uint64
 	}
+	dirData, err := readChainBounded(r, firstDirSector)
+	if err != nil {
+		return nil, fmt.Errorf("CFB: directory: %w", err)
+	}
 	var entries []dirInfo
-	dirOff := sectorOff(firstDirSector)
-	for i := 0; i < sectorSize/cfbDirEntrySize; i++ {
-		off := dirOff + i*cfbDirEntrySize
-		entryType := data[off+66]
+	var root dirInfo
+	rootFound := false
+	for off := 0; off+cfbDirEntrySize <= len(dirData); off += cfbDirEntrySize {
+		e := dirData[off : off+cfbDirEntrySize]
+		entryType := e[66]
 		if entryType == 0 {
 			continue
 		}
-		// Read UTF-16LE name.
-		nameSize := int(binary.LittleEndian.Uint16(data[off+64:]))
-		var name []byte
-		for j := 0; j < nameSize-2; j += 2 {
-			name = append(name, data[off+j])
+		// nameSize counts bytes including the UTF-16 null terminator.
+		nameSize := int(binary.LittleEndian.Uint16(e[64:]))
+		charBytes := nameSize - 2
+		if charBytes < 0 || charBytes > 62 {
+			charBytes = 62
 		}
-		startSec := binary.LittleEndian.Uint32(data[off+116:])
-		size := binary.LittleEndian.Uint64(data[off+120:])
-		entries = append(entries, dirInfo{
-			name:        string(name),
+		units := make([]uint16, 0, charBytes/2)
+		for j := 0; j+1 < charBytes; j += 2 {
+			units = append(units, binary.LittleEndian.Uint16(e[j:]))
+		}
+		if n := len(units); n > 0 && units[n-1] == 0 {
+			units = units[:n-1]
+		}
+		info := dirInfo{
+			name:        string(utf16.Decode(units)),
 			streamType:  entryType,
-			startSector: startSec,
-			size:        size,
-		})
+			startSector: binary.LittleEndian.Uint32(e[116:]),
+			size:        binary.LittleEndian.Uint64(e[120:]),
+		}
+		entries = append(entries, info)
+		if entryType == 5 && !rootFound {
+			root, rootFound = info, true
+		}
+	}
+	if !rootFound {
+		return nil, fmt.Errorf("CFB: no root directory entry")
 	}
 
-	// Read streams.
-	readStream := func(startSector uint32, size uint64, isMiniStream bool, miniStreamData []byte) []byte {
-		if isMiniStream {
-			out := make([]byte, size)
-			// Read mini-FAT.
-			miniFAT := make([]uint32, int(numMiniFATSectors)*(sectorSize/4))
-			for i := uint32(0); i < numMiniFATSectors; i++ {
-				off := sectorOff(firstMiniFATSector + i)
-				for j := 0; j < sectorSize/4; j++ {
-					miniFAT[int(i)*(sectorSize/4)+j] = binary.LittleEndian.Uint32(data[off+j*4:])
-				}
-			}
-			// Follow mini-sector chain.
-			pos := 0
-			ms := int(startSector)
-			for pos < int(size) && ms >= 0 && uint32(ms) != 0xFFFFFFFE {
-				srcOff := ms * cfbMiniSectorSize
-				n := cfbMiniSectorSize
-				if pos+n > int(size) {
-					n = int(size) - pos
-				}
-				if srcOff+n <= len(miniStreamData) {
-					copy(out[pos:], miniStreamData[srcOff:srcOff+n])
-				}
-				pos += n
-				if uint32(ms) < uint32(len(miniFAT)) {
-					ms = int(miniFAT[ms])
-				} else {
-					break
-				}
-			}
-			return out
+	// Mini-stream container (held by the root entry in regular sectors).
+	var miniStreamData []byte
+	if root.size > 0 {
+		miniStreamData, err = r.readChainData(root.startSector, root.size)
+		if err != nil {
+			return nil, fmt.Errorf("CFB: mini stream: %w", err)
 		}
-		// Regular stream: follow sector chain.
+	}
+
+	// Mini-FAT (chained through the regular FAT).
+	var miniFAT []uint32
+	if r.numMiniFAT > 0 && r.firstMiniFAT < 0xFFFFFFFA {
+		mfSectors, err := r.chain(r.firstMiniFAT)
+		if err != nil {
+			return nil, fmt.Errorf("CFB: mini FAT: %w", err)
+		}
+		miniFAT = make([]uint32, len(mfSectors)*entriesPerSector)
+		for i, sid := range mfSectors {
+			off := r.sectorOff(sid)
+			if off < 0 || off+r.sectorSize > len(data) {
+				return nil, fmt.Errorf("CFB: mini FAT sector %d outside file", sid)
+			}
+			for j := 0; j < entriesPerSector; j++ {
+				miniFAT[i*entriesPerSector+j] = binary.LittleEndian.Uint32(data[off+j*4:])
+			}
+		}
+	}
+
+	// readMiniStream assembles a stream stored in mini-sectors.
+	readMiniStream := func(startSector uint32, size uint64) ([]byte, error) {
+		if size > uint64(len(miniStreamData)) {
+			return nil, fmt.Errorf("CFB: mini stream size %d exceeds container %d", size, len(miniStreamData))
+		}
 		out := make([]byte, size)
 		pos := 0
 		s := startSector
-		for pos < int(size) && s < 0xFFFFFFFE {
-			off := sectorOff(s)
-			n := sectorSize
+		seen := make(map[uint32]bool)
+		for pos < int(size) && s < 0xFFFFFFFA {
+			if seen[s] {
+				return nil, fmt.Errorf("CFB: cycle in mini chain at %d", s)
+			}
+			seen[s] = true
+			if int(s) >= len(miniFAT) {
+				return nil, fmt.Errorf("CFB: mini sector %d outside mini FAT", s)
+			}
+			srcOff := int(s) * r.miniSectorSz
+			n := r.miniSectorSz
 			if pos+n > int(size) {
 				n = int(size) - pos
 			}
-			copy(out[pos:], data[off:off+n])
+			if srcOff+n > len(miniStreamData) {
+				return nil, fmt.Errorf("CFB: mini sector %d outside mini stream", s)
+			}
+			copy(out[pos:pos+n], miniStreamData[srcOff:srcOff+n])
 			pos += n
-			s = fat[s]
+			s = miniFAT[s]
 		}
-		return out
-	}
-
-	// Find the mini-stream from the root entry.
-	var miniStreamData []byte
-	for _, e := range entries {
-		if e.streamType == 5 { // root storage
-			miniStreamData = readStream(e.startSector, e.size, false, nil)
-			break
+		if pos < int(size) {
+			return nil, fmt.Errorf("CFB: mini chain ended after %d of %d bytes", pos, size)
 		}
+		return out, nil
 	}
 
 	// Read named streams.
@@ -596,11 +733,44 @@ func readCFBStreams(data []byte) (map[string][]byte, error) {
 		if e.streamType != 2 {
 			continue
 		}
-		isMini := e.size < cfbMiniStreamCutoff
-		result[e.name] = readStream(e.startSector, e.size, isMini, miniStreamData)
+		var payload []byte
+		if e.size < r.miniCutoff {
+			payload, err = readMiniStream(e.startSector, e.size)
+		} else {
+			payload, err = r.readChainData(e.startSector, e.size)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("CFB: stream %q: %w", e.name, err)
+		}
+		result[e.name] = payload
 	}
 
 	return result, nil
+}
+
+// readChainBounded reads a FAT chain without knowing its byte size up front
+// (used for the directory, whose chain may span several sectors).
+func readChainBounded(r *cfbReader, start uint32) ([]byte, error) {
+	sectors, err := r.chain(start)
+	if err != nil {
+		return nil, err
+	}
+	if len(sectors) == 0 {
+		return nil, fmt.Errorf("empty chain")
+	}
+	out := make([]byte, 0, len(sectors)*r.sectorSize)
+	for _, sid := range sectors {
+		off := r.sectorOff(sid)
+		if off < 0 || off >= len(r.data) {
+			return nil, fmt.Errorf("CFB: sector %d outside file", sid)
+		}
+		n := r.sectorSize
+		if off+n > len(r.data) {
+			n = len(r.data) - off
+		}
+		out = append(out, r.data[off:off+n]...)
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -620,38 +790,47 @@ func isCFBFile(data []byte) bool {
 	return true
 }
 
-// readCFBEncrypted extracts the EncryptionInfo XML and EncryptedPackage
-// bytes from an OLE/CFB container produced by writeEncryptedCFB.
+// readCFBEncrypted extracts the EncryptionInfo XML, EncryptedPackage bytes,
+// and declared original size from an OLE/CFB container.
 //
-// The EncryptionInfo stream starts with a 4-byte version header (0x00040004
-// for Agile) followed by the XML. The EncryptedPackage stream starts with
-// an 8-byte original-size header followed by the encrypted data.
-func readCFBEncrypted(data []byte) (infoXML, encPkg []byte, err error) {
+// Spec-compliant EncryptionInfo streams start with an 8-byte header
+// (version 0x00040004 + 4 reserved zero bytes) followed by the XML. Files
+// written by earlier versions of this library used only the 4-byte version;
+// both are detected. The EncryptedPackage stream always starts with an
+// 8-byte original-size header.
+func readCFBEncrypted(data []byte) (infoXML, encPkg []byte, origSize uint64, err error) {
 	streams, err := readCFBStreams(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("reading CFB: %w", err)
+		return nil, nil, 0, fmt.Errorf("reading CFB: %w", err)
 	}
 
 	infoStream, ok := streams["EncryptionInfo"]
 	if !ok {
-		return nil, nil, fmt.Errorf("CFB: missing EncryptionInfo stream")
+		return nil, nil, 0, fmt.Errorf("CFB: missing EncryptionInfo stream")
 	}
 	pkgStream, ok := streams["EncryptedPackage"]
 	if !ok {
-		return nil, nil, fmt.Errorf("CFB: missing EncryptedPackage stream")
+		return nil, nil, 0, fmt.Errorf("CFB: missing EncryptedPackage stream")
 	}
 
-	// EncryptionInfo: skip 4-byte version header.
-	if len(infoStream) < 4 {
-		return nil, nil, fmt.Errorf("CFB: EncryptionInfo too short")
+	// EncryptionInfo: spec files carry an 8-byte header (version + reserved
+	// 0x40) before the XML; files from earlier versions of this library had
+	// only the 4-byte version, so the XML starts with '<' at offset 4.
+	skip := 8
+	if infoStream[4] == '<' {
+		skip = 4
 	}
-	infoXML = infoStream[4:]
+	if len(infoStream) <= skip {
+		return nil, nil, 0, fmt.Errorf("CFB: EncryptionInfo too short")
+	}
+	infoXML = infoStream[skip:]
 
-	// EncryptedPackage: skip 8-byte size header.
+	// EncryptedPackage: 8-byte size header.
 	if len(pkgStream) < 8 {
-		return nil, nil, fmt.Errorf("CFB: EncryptedPackage too short")
+		return nil, nil, 0, fmt.Errorf("CFB: EncryptedPackage too short")
 	}
+	origSize = binary.LittleEndian.Uint64(pkgStream[:8])
 	encPkg = pkgStream[8:]
 
-	return infoXML, encPkg, nil
+	return infoXML, encPkg, origSize, nil
 }

@@ -96,6 +96,13 @@ type Style struct {
 	Fill      *Fill
 	Alignment *Alignment
 	Border    *Border
+	// NumberFormat is the number format code applied to the cell, e.g.
+	// "0.00", "#,##0.00", "0%" or "yyyy-mm-dd". Codes known to Excel as
+	// built-ins are stored under their standard numFmtId; any other code
+	// is written as a custom <numFmt> entry in styles.xml. Empty (or
+	// "General") means the General format. Dates and times are stored as
+	// Excel serial numbers — see TimeToSerial and SerialToTime.
+	NumberFormat string
 }
 
 // NewStyle returns a Style initialised with sensible defaults:

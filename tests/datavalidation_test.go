@@ -3,6 +3,7 @@ package cells_foss_test
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	cells_foss "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss"
@@ -74,6 +75,92 @@ func TestDataValidation_NilAndEmpty(t *testing.T) {
 	}
 	if err := ws.AddDataValidation("", &cells_foss.DataValidation{Type: cells_foss.DataValidationTypeList}); err == nil {
 		t.Error("empty ref should error")
+	}
+}
+
+func TestDataValidation_Operator(t *testing.T) {
+	// All eight spec operators are accepted; unknown ones are refused.
+	wb := cells_foss.NewWorkbook()
+	ws := wb.Worksheets[0]
+	ops := []string{
+		cells_foss.DataValidationOpBetween,
+		cells_foss.DataValidationOpNotBetween,
+		cells_foss.DataValidationOpEqual,
+		cells_foss.DataValidationOpNotEqual,
+		cells_foss.DataValidationOpLessThan,
+		cells_foss.DataValidationOpLessThanOrEqual,
+		cells_foss.DataValidationOpGreaterThan,
+		cells_foss.DataValidationOpGreaterThanOrEqual,
+	}
+	for i, op := range ops {
+		dv := &cells_foss.DataValidation{
+			Type: cells_foss.DataValidationTypeWhole, Operator: op, Formula1: "1",
+		}
+		if err := ws.AddDataValidation("A"+string(rune('1'+i)), dv); err != nil {
+			t.Fatalf("operator %q rejected: %v", op, err)
+		}
+	}
+	if err := ws.AddDataValidation("B1", &cells_foss.DataValidation{
+		Type: cells_foss.DataValidationTypeWhole, Operator: "sideways", Formula1: "1",
+	}); err == nil {
+		t.Error("invalid operator should be rejected")
+	}
+
+	// Save/load: an explicit operator is written; the empty default is
+	// omitted from the XML, matching Excel's own output.
+	wb = cells_foss.NewWorkbook()
+	ws = wb.Worksheets[0]
+	if err := ws.AddDataValidation("A2:A5", &cells_foss.DataValidation{
+		Type:     cells_foss.DataValidationTypeWhole,
+		Operator: cells_foss.DataValidationOpGreaterThan,
+		Formula1: "10",
+	}); err != nil {
+		t.Fatalf("AddDataValidation (greaterThan): %v", err)
+	}
+	if err := ws.AddDataValidation("B2:B5", &cells_foss.DataValidation{
+		Type: cells_foss.DataValidationTypeDecimal, Formula1: "0", Formula2: "1",
+	}); err != nil {
+		t.Fatalf("AddDataValidation (default): %v", err)
+	}
+	if err := ws.AddDataValidation("C2:C5", &cells_foss.DataValidation{
+		Type:     cells_foss.DataValidationTypeWhole,
+		Operator: cells_foss.DataValidationOpBetween,
+		Formula1: "1", Formula2: "9",
+	}); err != nil {
+		t.Fatalf("AddDataValidation (explicit between): %v", err)
+	}
+
+	p := filepath.Join(t.TempDir(), "dvop.xlsx")
+	if err := wb.Save(p); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	sheetRaw := string(readZipEntry(t, p, "xl/worksheets/sheet1.xml"))
+	if n := strings.Count(sheetRaw, "operator="); n != 2 {
+		t.Errorf("found %d operator attributes, want 2 (empty default omitted)", n)
+	}
+	if !strings.Contains(sheetRaw, `operator="greaterThan"`) {
+		t.Error(`missing operator="greaterThan"`)
+	}
+	if !strings.Contains(sheetRaw, `operator="between"`) {
+		t.Error(`missing explicit operator="between"`)
+	}
+
+	loaded, err := cells_foss.LoadWorkbook(p)
+	if err != nil {
+		t.Fatalf("LoadWorkbook: %v", err)
+	}
+	dvs := loaded.Worksheets[0].DataValidations
+	if len(dvs) != 3 {
+		t.Fatalf("loaded %d DVs, want 3", len(dvs))
+	}
+	if dvs[0].Operator != cells_foss.DataValidationOpGreaterThan {
+		t.Errorf("Operator = %q, want greaterThan", dvs[0].Operator)
+	}
+	if dvs[1].Operator != "" {
+		t.Errorf("Operator = %q, want empty (omitted default)", dvs[1].Operator)
+	}
+	if dvs[2].Operator != cells_foss.DataValidationOpBetween {
+		t.Errorf("Operator = %q, want between", dvs[2].Operator)
 	}
 }
 

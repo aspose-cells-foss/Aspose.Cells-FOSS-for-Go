@@ -1,11 +1,14 @@
 package cells_foss_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"testing"
 
 	cells_foss "github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/v26/aspose/cells_foss"
@@ -179,4 +182,140 @@ func TestSave_NilAndRepeated(t *testing.T) {
 	dir := t.TempDir()
 	wb.Save(filepath.Join(dir, "s1.xlsx"))
 	wb.Save(filepath.Join(dir, "s2.xlsx")) // repeated save without modifications
+}
+
+// TestSave_PreservesUnmodeledWorkbookParts verifies that workbook-scoped
+// parts the library does not model (docProps, theme) survive modified saves
+// byte-for-byte, together with the relationships that reach them.
+func TestSave_PreservesUnmodeledWorkbookParts(t *testing.T) {
+	const (
+		coreXML  = `<cp:coreProperties xmlns:cp="ns-core">MARKER-CORE</cp:coreProperties>`
+		appXML   = `<Properties xmlns="ns-ext">MARKER-APP</Properties>`
+		themeXML = `<a:theme xmlns:a="ns-theme" name="MARKER-THEME"/>`
+	)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "input.xlsx")
+	writeWorkbookPartsFile(t, src, map[string]string{
+		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+  <Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+</Types>`,
+		"_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`,
+		"xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`,
+		"xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>
+</Relationships>`,
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>
+</worksheet>`,
+		"docProps/core.xml":   coreXML,
+		"docProps/app.xml":    appXML,
+		"xl/theme/theme1.xml": themeXML,
+	})
+
+	wb, err := cells_foss.LoadWorkbook(src)
+	if err != nil {
+		t.Fatalf("LoadWorkbook: %v", err)
+	}
+
+	// Two consecutive modified saves: the second one works from the package
+	// bytes produced by the first, so preservation must be self-sustaining.
+	prev := src
+	for i, ref := range []string{"B2", "C3"} {
+		wb.Worksheets[0].Cells().Set(ref, i+2)
+		out := filepath.Join(dir, fmt.Sprintf("out%d.xlsx", i+1))
+		if err := wb.Save(out); err != nil {
+			t.Fatalf("Save %d: %v", i+1, err)
+		}
+
+		if got := readZipEntry(t, out, "docProps/core.xml"); string(got) != coreXML {
+			t.Errorf("save %d: core.xml = %q, want %q", i+1, got, coreXML)
+		}
+		if got := readZipEntry(t, out, "docProps/app.xml"); string(got) != appXML {
+			t.Errorf("save %d: app.xml = %q, want %q", i+1, got, appXML)
+		}
+		if got := readZipEntry(t, out, "xl/theme/theme1.xml"); string(got) != themeXML {
+			t.Errorf("save %d: theme1.xml = %q, want %q", i+1, got, themeXML)
+		}
+
+		rootRels := readZipEntry(t, out, "_rels/.rels")
+		if !bytes.Contains(rootRels, []byte(`Target="docProps/core.xml"`)) ||
+			!bytes.Contains(rootRels, []byte(`Target="docProps/app.xml"`)) {
+			t.Errorf("save %d: root rels lost docProps relationships: %s", i+1, rootRels)
+		}
+		wbRels := readZipEntry(t, out, "xl/_rels/workbook.xml.rels")
+		if !bytes.Contains(wbRels, []byte(`Target="theme/theme1.xml"`)) {
+			t.Errorf("save %d: workbook rels lost theme relationship: %s", i+1, wbRels)
+		}
+		ct := readZipEntry(t, out, "[Content_Types].xml")
+		for _, part := range []string{"/docProps/core.xml", "/docProps/app.xml", "/xl/theme/theme1.xml"} {
+			if !bytes.Contains(ct, []byte(`PartName="`+part+`"`)) {
+				t.Errorf("save %d: content types lost declaration for %s", i+1, part)
+			}
+		}
+		prev = out
+	}
+
+	// The edited cells must have round-tripped alongside the preserved parts.
+	reloaded, err := cells_foss.LoadWorkbook(prev)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	c, err := reloaded.Worksheets[0].Cells().Get("C3")
+	if err != nil {
+		t.Fatalf("Get C3: %v", err)
+	}
+	got, ok := c.AsInt()
+	if !ok || got != 3 {
+		t.Errorf("C3 = %d (ok=%v), want 3", got, ok)
+	}
+}
+
+// writeWorkbookPartsFile writes the given parts, in sorted name order, into
+// a zip package at path.
+func writeWorkbookPartsFile(t *testing.T, path string, parts map[string]string) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+
+	zw := zip.NewWriter(f)
+	names := make([]string, 0, len(parts))
+	for name := range parts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fw, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := fw.Write([]byte(parts[name])); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
 }
