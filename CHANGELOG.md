@@ -138,4 +138,4 @@ No new deprecations in this release. Previously deprecated APIs remain deprecate
   created, edited, or executed.
 - Stream-loaded workbooks have an empty `FilePath`.
 
-[26.11]: https://github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/releases/tag/v26.11
+[26.11]: https://github.com/aspose-cells-foss/Aspose.Cells-FOSS-for-Go/releases/tag/v26.11.0
